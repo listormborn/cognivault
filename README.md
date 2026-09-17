@@ -1,249 +1,156 @@
 # CogniVault
 
-Knowledge access layer for AI agents working with Obsidian vaults. CogniVault indexes your vault, generates embeddings, and exposes a REST API for semantic search, context assembly, and file management — giving your AI tools structured access to your knowledge base.
+Слой доступа к базе знаний Obsidian для AI-агентов: индексация файлов, поиск релевантных фрагментов и сборка контекста с ограничением по числу токенов.
 
-## Features
+**Стек:** TypeScript, Node.js 22, Fastify, Qdrant, SQLite / Drizzle, OpenAI embeddings, Vitest, Docker, Prometheus и Grafana.
 
-- **Hybrid search** — semantic (vector), lexical (full-text), and fused (RRF) search across your vault
-- **Context packing** — assembles token-budgeted context packs from search results, ready for LLM consumption
-- **Vault management** — CRUD operations on notes with frontmatter support
-- **Multi-tenant** — per-user isolated vaults, databases, and vector collections
-- **Auto-indexing** — watches vault for changes, re-indexes automatically
-- **Multi-format** — Markdown, PDF, CSV, Excalidraw, and Canvas files
-- **Observability** — Prometheus metrics, Grafana dashboards, OpenTelemetry tracing
-- **OpenAPI** — auto-generated docs via Swagger UI at `/api/documentation`
+## Задача
 
-## Quick Start
+Дать агенту возможность находить информацию в заметках через API, не передавая ему весь vault. Разделить поиск, подготовку контекста и отслеживание изменений файлов, чтобы повторно обрабатывать только изменившиеся данные.
 
-### With Docker (recommended)
+## Что реализовано
+
+- Семантический поиск по embeddings, лексический поиск по текстовым полям и объединение результатов через Reciprocal Rank Fusion (RRF).
+- Фильтрация по метаданным и сборка контекста в заданный бюджет токенов.
+- Обработка Markdown, PDF, CSV, Excalidraw и Canvas; отслеживание изменений файлов.
+- Реестр пользователей, Bearer API keys, отдельные SQLite-базы и фильтрация векторных данных по пользователю.
+- CLI подключения Obsidian Sync, управление процессами синхронизации, фоновые задачи переиндексации.
+- OpenAPI, структурированные логи, метрики, дашборды и интеграция OpenTelemetry.
+- Unit-тесты, отдельный интеграционный тест изоляции пользователей и инструмент оценки recall@10.
+
+Ключевые части кода: [поиск](src/features/search/service.ts), [контекст](src/features/context/service.ts), [индексатор](src/lib/indexer.ts), [доступ к Qdrant от имени пользователя](src/lib/tenant-qdrant-client.ts).
+
+## Запуск
+
+### Требования
+
+- Docker с Compose.
+- Для подключения данных через текущий CLI: аккаунт с доступом к нужному vault в Obsidian Sync и OpenAI API key для embeddings. Запросы embeddings могут тарифицироваться.
+- Для локальных проверок кода: Node.js 22 и pnpm 9.15.4.
+
+### Поднять сервис
 
 ```bash
-cp .env.example .env
-# Edit .env — set VAULT_PATH and OPENAI_API_KEY
-
-docker compose up
+git clone https://github.com/coolcrazycool/cognivault.git
+cd cognivault
+docker compose up --build -d
+curl --fail http://localhost:3030/health
 ```
 
-This starts CogniVault, Qdrant, Prometheus, and Grafana. The API is available at `http://localhost:3000`.
+Compose публикует API на порту **3030**, а внутри контейнера приложение слушает `3000`. Внешний порт меняется через `COGNIVAULT_PORT`. Документация: [Swagger UI](http://localhost:3030/docs); Grafana: [localhost:3010](http://localhost:3010).
 
-### Without Docker
+Первый запуск создаёт пустой реестр пользователей. Ответ `/health` проверяет доступность процесса, но не наличие проиндексированных заметок.
 
-**Prerequisites:** Node.js 22+, pnpm, a running [Qdrant](https://qdrant.tech/) instance.
+### Подключить пользователя
+
+CLI запускается внутри контейнера, где уже установлен `ob` (obsidian-headless). Задайте `OBSIDIAN_EMAIL`, `OBSIDIAN_PASSWORD`, `OBSIDIAN_VAULT` и `OPENAI_API_KEY` в локальном окружении, затем выполните:
 
 ```bash
-pnpm install
-pnpm build
-
-cp .env.example .env
-# Edit .env — set VAULT_PATH, OPENAI_API_KEY, QDRANT_URL
-
-pnpm start
+docker compose exec cognivault node dist/cli/index.js add-user alice \
+  --obsidian-email "$OBSIDIAN_EMAIL" \
+  --obsidian-password "$OBSIDIAN_PASSWORD" \
+  --vault "$OBSIDIAN_VAULT" \
+  --openai-key "$OPENAI_API_KEY" \
+  --data-dir /data
 ```
 
-For development with auto-reload:
+Команда выполняет вход и настройку синхронизации, сохраняет пользователя и выводит сгенерированный API key с префиксом `cv-`. Сохраните его в переменной `API_KEY` для следующих запросов. Имя пользователя должно состоять из строчных латинских букв, цифр и дефисов.
+
+Передаваемые CLI секреты могут быть видны в аргументах процесса; запускайте команду только в доверенном окружении. Запись пользователя и vault находятся в Docker volume `cognivault_data`. Не удаляйте этот volume для обычного перезапуска.
+
+Посмотреть состояние индексации и синхронизации:
 
 ```bash
-pnpm build && pnpm dev
+docker compose logs --tail=100 cognivault
 ```
 
-## User Management
+Дождитесь загрузки заметок и обработки файлов. Текущий Compose настроен на данные пользователей в `/data`: простого задания `VAULT_PATH` в `.env` недостаточно для подключения произвольной папки с хоста.
 
-CogniVault uses API key authentication. Manage users with the CLI:
+## Пример результата
 
-```bash
-# Add a user with a vault path
-node dist/cli/index.js add-user --id alice --key cvk_alice_secret --vault /path/to/vault
-
-# List users
-node dist/cli/index.js list-users
-```
-
-## API
-
-All endpoints (except health checks) require an `Authorization: Bearer <api-key>` header.
-
-### Search
+После индексации заметок:
 
 ```bash
-# Semantic search (vector similarity)
-curl -X POST http://localhost:3000/search/semantic \
+curl --fail http://localhost:3030/api/vault/search/hybrid \
   -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "how does authentication work", "limit": 5}'
-
-# Hybrid search (semantic + lexical with RRF fusion)
-curl -X POST http://localhost:3000/search/hybrid \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "authentication flow", "limit": 10}'
-
-# Lexical search (full-text)
-curl -X POST http://localhost:3000/search/lexical \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "OAuth2", "limit": 10}'
+  -H 'Content-Type: application/json' \
+  -d '{"query":"Как устроена авторизация?","limit":3}'
 ```
 
-**Search filters:**
+Иллюстративная форма ответа для vault с заметкой об авторизации; значения и время ниже не являются результатами замера:
 
 ```json
 {
-  "query": "deployment",
-  "limit": 10,
-  "filters": {
-    "tags": ["devops"],
-    "folder": "projects/",
-    "type": "note"
-  }
+  "results": [{
+    "text": "Клиент передаёт API key в заголовке Authorization.",
+    "path": "architecture/auth.md",
+    "title": "Авторизация",
+    "section_path": "API",
+    "score": 0.0328,
+    "tags": ["backend"],
+    "project": null,
+    "status": null,
+    "type": "architecture"
+  }],
+  "total": 1,
+  "limit": 3,
+  "query_ms": 120
 }
 ```
 
-### Context Pack
-
-Assembles a token-budgeted context pack from search results — ideal for feeding into LLMs:
+Собрать контекст для агента:
 
 ```bash
-curl -X POST http://localhost:3000/context \
+curl --fail http://localhost:3030/api/vault/context \
   -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "project architecture", "token_budget": 16000}'
+  -H 'Content-Type: application/json' \
+  -d '{"query":"Как устроена авторизация?","token_budget":2000}'
 ```
 
-### Vault Operations
+Ответ содержит тематические разделы с текстом и источниками, а также `meta` со счётчиком токенов. Счётчик относится к включённому тексту, а не ко всему сериализованному JSON и будущему prompt агента.
+
+## Ограничения
+
+- Это развивающийся проект, без опубликованного воспроизводимого benchmark производительности или качества поиска.
+- Лексический поиск использует Qdrant `scroll` с текстовыми фильтрами; это не BM25. RRF объединяет порядок результатов двух источников. Качество следует проверять на целевом наборе заметок.
+- Фильтр папки применяется после получения ограниченного числа результатов, поэтому выдача может быть неполной.
+- Legacy CRUD-маршруты заметок используют глобальный `VAULT_PATH`; их нельзя считать готовым многопользовательским API редактирования. Основной сценарий здесь — поиск и контекст.
+- Реестр хранит API keys и Obsidian credentials в JSON без шифрования. Docker Compose предназначен для доверенного окружения, а не публичного развёртывания без дополнительной защиты.
+- В текущем sync-плагине запуск привязан к событию добавления пользователя; возобновление синхронизации уже существующих пользователей после перезапуска требует доработки. Индексация имеющихся локальных файлов запускается отдельно.
+- `.env.example` содержит устаревший пример CLI. Для подключения пользователя используйте команду выше. При локальном запуске незаданные необязательные URL-переменные следует пропускать, а не оставлять пустыми.
+
+## Мой вклад
+
+Инженерная часть проекта: связка индексации, поиска и подготовки контекста; интеграция Qdrant и SQLite; API, управление пользователями, тестовые сценарии и наблюдаемость. Используются готовые модели embeddings и библиотеки — собственная модель не обучалась в рамках представленного кода.
+
+Конкретный пример работы над корректностью — [исправление повторной генерации embeddings после изменения заметки](https://github.com/coolcrazycool/cognivault/pull/1): обновление хеша в SQLite заменено с присваивания прежнего значения на входящее значение `excluded.*`. Это устраняет причину повторного обнаружения одного и того же изменения; количественная экономия здесь не заявляется.
+
+## Проверки
 
 ```bash
-# List files
-curl http://localhost:3000/vault/files \
-  -H "Authorization: Bearer $API_KEY"
-
-# Read note content
-curl "http://localhost:3000/vault/content?path=notes/readme.md" \
-  -H "Authorization: Bearer $API_KEY"
-
-# Create a note
-curl -X POST http://localhost:3000/vault/content \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"path": "notes/new-note.md", "content": "# Hello", "frontmatter": {"tags": ["example"]}}'
-
-# Update content
-curl -X PUT http://localhost:3000/vault/content \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"path": "notes/new-note.md", "content": "# Updated content"}'
-
-# Delete a note
-curl -X DELETE http://localhost:3000/vault/content \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"path": "notes/new-note.md"}'
-```
-
-### Admin
-
-```bash
-# Trigger full reindex
-curl -X POST http://localhost:3000/admin/reindex \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"scope": "full"}'
-
-# Check reindex status
-curl "http://localhost:3000/admin/reindex/status?jobId=<job-id>" \
-  -H "Authorization: Bearer $API_KEY"
-```
-
-### Health
-
-```bash
-curl http://localhost:3000/health   # Liveness probe (no auth)
-curl http://localhost:3000/ready    # Readiness probe (no auth)
-```
-
-Full API documentation is available at `/api/documentation` when the server is running (Swagger UI).
-
-## Configuration
-
-See [`.env.example`](.env.example) for all available environment variables.
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `VAULT_PATH` | Yes* | — | Path to Obsidian vault (* or configure per-user via CLI) |
-| `OPENAI_API_KEY` | Yes | — | OpenAI API key for generating embeddings |
-| `PORT` | No | `3000` | HTTP server port |
-| `QDRANT_URL` | No | `http://localhost:6333` | Qdrant vector database URL |
-| `EMBEDDING_MODEL` | No | `text-embedding-3-small` | OpenAI embedding model |
-| `LOG_LEVEL` | No | `info` | Log level (fatal/error/warn/info/debug/trace) |
-| `COGNIVAULT_DATA_DIR` | No | `./.cognivault` | Directory for SQLite databases and state |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | No | — | OpenTelemetry collector for distributed tracing |
-
-## Monitoring
-
-Docker Compose includes a full observability stack:
-
-- **Prometheus** — `http://localhost:9090` — metrics collection
-- **Grafana** — `http://localhost:3010` — pre-configured dashboards:
-  - **System** — request rates, latencies, error rates
-  - **Indexing** — files processed, indexing duration, errors
-  - **Search** — query latency, result counts, search types
-
-## Architecture
-
-```
-┌─────────────┐     ┌──────────────┐     ┌─────────┐
-│  AI Agent   │────>│  CogniVault  │────>│  Qdrant │
-│  (client)   │<────│  (Fastify)   │<────│ (vectors)│
-└─────────────┘     └──────┬───────┘     └─────────┘
-                           │
-                    ┌──────┴───────┐
-                    │   SQLite     │
-                    │ (index state)│
-                    └──────────────┘
-                           │
-                    ┌──────┴───────┐
-                    │  Obsidian    │
-                    │   Vault      │
-                    │ (filesystem) │
-                    └──────────────┘
-```
-
-**Stack:** Node.js 22, Fastify, TypeScript, Qdrant, SQLite (Drizzle ORM), OpenAI embeddings
-
-## Development
-
-```bash
-pnpm install
+pnpm install --frozen-lockfile
 pnpm build
-
-# Run tests
+touch .env
 pnpm test
-
-# Lint + format + typecheck
 pnpm check
-
-# Format code
-pnpm format
 ```
 
-### Project Structure
+`pnpm test` запускает тесты в `src/**/__tests__`. Отдельный набор в `test/` не входит в эту команду:
 
-```
-src/
-  app.ts              # Fastify app factory
-  server.ts           # Entry point
-  config.ts           # Zod-validated env config
-  plugins/            # Fastify plugins (auth, db, embedding, metrics, etc.)
-  features/           # Feature modules
-    health/           # Health/readiness probes
-    search/           # Semantic, lexical, hybrid search
-    context/          # Context pack assembly
-    vault/            # File CRUD operations
-    admin/            # Reindexing operations
-  lib/                # Shared utilities (chunkers, indexer, vault)
-  cli/                # CLI for user management
-  db/                 # Database schema (Drizzle)
+```bash
+pnpm exec vitest run --config vitest.integration.config.ts
 ```
 
-## License
+Интеграционный тест требует `QDRANT_URL` и `OPENAI_API_KEY` в окружении и пропускается при их отсутствии. Используйте отдельное тестовое окружение: тест создаёт пользователей, файлы и векторные данные, а для полного приложения требуется доступная команда `ob`.
 
-[MIT](LICENSE)
+Оценка поиска для подготовленного и проиндексированного набора заметок:
+
+```bash
+BASE_URL=http://localhost:3030 COGNIVAULT_API_KEY="$API_KEY" pnpm exec tsx test/eval/eval.ts
+```
+
+Релевантные пути задаются в [test/eval/queries.json](test/eval/queries.json). Этот файл нужно согласовать с тестовым vault. Скрипт оценки не заменяет опубликованные результаты; его подсчёт recall требует проверки дедупликации путей при выдаче нескольких фрагментов одной заметки.
+
+## Лицензия
+
+[MIT](LICENSE).
