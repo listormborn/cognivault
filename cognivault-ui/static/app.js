@@ -140,6 +140,10 @@
     reindexConsole: $("reindex-console"),
     evalBlock: $("eval-block"),
     evalBtn: $("eval-btn"),
+    evalDataset: $("eval-dataset"),
+    evalDatasetInfo: $("eval-dataset-info"),
+    evalFile: $("eval-file"),
+    evalUploadBtn: $("eval-upload-btn"),
     evalLabel: $("eval-label"),
     evalLimit: $("eval-limit"),
     evalProgress: $("eval-progress"),
@@ -1696,11 +1700,80 @@
     }
     dom.evalBlock.hidden = !st.available;
     if (!st.available) return;
+    renderEvalDatasets(st.datasets || []);
     renderEvalReports(st.reports || []);
     if (st.job) {
       renderEvalJob(st.job);
       // Прогон переживает перезагрузку страницы — подхватываем его опрос.
       if (st.job.status === "running") pollEval();
+    }
+  }
+
+  function renderEvalDatasets(datasets) {
+    if (!dom.evalDataset) return;
+    const selected = dom.evalDataset.value || "builtin:golden.jsonl";
+    dom.evalDataset.innerHTML = "";
+    datasets.forEach((dataset) => {
+      const option = document.createElement("option");
+      option.value = dataset.id;
+      const origin = dataset.source === "upload" ? "загружен" : "в образе";
+      option.textContent = dataset.name + " · " + dataset.rows + " вопросов · " + origin;
+      option.dataset.rows = String(dataset.rows || 0);
+      option.dataset.withGroundTruth = String(dataset.with_ground_truth || 0);
+      dom.evalDataset.appendChild(option);
+    });
+    if ([...dom.evalDataset.options].some((option) => option.value === selected)) {
+      dom.evalDataset.value = selected;
+    } else if ([...dom.evalDataset.options].some((option) => option.value === "builtin:golden.jsonl")) {
+      dom.evalDataset.value = "builtin:golden.jsonl";
+    }
+    renderEvalDatasetInfo();
+  }
+
+  function renderEvalDatasetInfo() {
+    if (!dom.evalDatasetInfo || !dom.evalDataset) return;
+    const option = dom.evalDataset.selectedOptions[0];
+    if (!option) {
+      dom.evalDatasetInfo.textContent = "Загрузите JSONL или Excel (.xlsx) с вопросами.";
+      return;
+    }
+    const rows = parseInt(option.dataset.rows || "0", 10);
+    const withTruth = parseInt(option.dataset.withGroundTruth || "0", 10);
+    dom.evalDatasetInfo.textContent = withTruth < rows
+      ? "Эталонные ответы: " + withTruth + " из " + rows + ". Метрики по ground_truth будут неполными."
+      : "Эталонные ответы заполнены для всех " + rows + " вопросов.";
+  }
+
+  async function uploadEvalDataset(file) {
+    if (!file) return;
+    const original = dom.evalUploadBtn.textContent;
+    dom.evalUploadBtn.disabled = true;
+    dom.evalUploadBtn.textContent = "Загружаю…";
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await fetch("/api/eval/dataset", {
+        method: "POST",
+        body: form,
+        headers: authHeaders(),
+      });
+      if (res.status === 401 && isServerMode()) { handleUnauthorized(); return; }
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const message = body && body.error && body.error.message;
+        throw new Error(message || "HTTP " + res.status);
+      }
+      const st = await apiGet("/api/eval/status");
+      renderEvalDatasets(st.datasets || []);
+      dom.evalDataset.value = body.id;
+      renderEvalDatasetInfo();
+      toast("ok", "Набор загружен", body.rows + " вопросов");
+    } catch (e) {
+      if (!e.handled) toast("err", "Не удалось загрузить вопросы", e.message);
+    } finally {
+      dom.evalUploadBtn.disabled = false;
+      dom.evalUploadBtn.textContent = original;
+      dom.evalFile.value = "";
     }
   }
 
@@ -1804,13 +1877,18 @@
   async function startEval() {
     const label = (dom.evalLabel && dom.evalLabel.value.trim()) || "baseline";
     const limit = dom.evalLimit ? parseInt(dom.evalLimit.value, 10) || 0 : 0;
+    const dataset = dom.evalDataset ? dom.evalDataset.value : "builtin:golden.jsonl";
     const many = limit === 0 || limit > 10;
     if (many && !confirm(
-      "Прогон сделает около 190 обращений к модели и займёт несколько минут. Запустить?"
+      "На каждый вопрос приходится несколько обращений к модели. Полный прогон может идти долго. Запустить?"
     )) return;
     if (dom.evalConsole) { dom.evalConsole.innerHTML = ""; dom.evalConsole.hidden = true; }
     try {
-      const job = await apiSend("/api/eval/run", "POST", { label: label, limit: limit });
+      const job = await apiSend("/api/eval/run", "POST", {
+        label: label,
+        limit: limit,
+        dataset: dataset,
+      });
       renderEvalJob(job);
       pollEval();
     } catch (e) {
@@ -2631,6 +2709,11 @@
     // index maintenance — same null-guard discipline as the Confluence block
     if (dom.reindexBtn) dom.reindexBtn.addEventListener("click", startReindex);
     if (dom.evalBtn) dom.evalBtn.addEventListener("click", startEval);
+    if (dom.evalDataset) dom.evalDataset.addEventListener("change", renderEvalDatasetInfo);
+    if (dom.evalUploadBtn && dom.evalFile) {
+      dom.evalUploadBtn.addEventListener("click", () => dom.evalFile.click());
+      dom.evalFile.addEventListener("change", () => uploadEvalDataset(dom.evalFile.files[0]));
+    }
     if (dom.rebuildBtn) dom.rebuildBtn.addEventListener("click", openRebuildConfirm);
     if (dom.rebuildCancel) dom.rebuildCancel.addEventListener("click", closeRebuildConfirm);
     if (dom.rebuildGo) dom.rebuildGo.addEventListener("click", startRebuild);

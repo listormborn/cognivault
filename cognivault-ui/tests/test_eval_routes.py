@@ -8,10 +8,12 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import os
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -19,7 +21,7 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app import eval_runner, settings  # noqa: E402
+from app import eval_datasets, eval_runner, settings  # noqa: E402
 from app.config import AppPaths  # noqa: E402
 from app.main import create_app  # noqa: E402
 from app.routes import eval_routes  # noqa: E402
@@ -206,6 +208,98 @@ def test_run_is_started_strictly_single_threaded(tmp_path, monkeypatch):
     assert resp.status_code == 200
     argv = seen["argv"]
     assert argv[argv.index("--concurrency") + 1] == "1"
+
+
+def test_uploaded_jsonl_is_listed_and_can_be_selected(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "is_server", lambda: False)
+    monkeypatch.setattr(
+        eval_routes, "resolve_paths", lambda request: AppPaths(root=tmp_path)
+    )
+    monkeypatch.setattr(eval_runner, "available", lambda: True)
+    seen: dict = {}
+
+    def fake_start(*, label, argv, out_dir):
+        seen["argv"] = argv
+        return eval_runner.EvalJob(label=label)
+
+    monkeypatch.setattr(eval_runner.RUNNER, "start", fake_start)
+    content = (
+        '{"id":"q1","question":"Что такое вольт?","ground_truth":"База знаний."}\n'
+    )
+
+    with TestClient(create_app()) as client:
+        uploaded = client.post(
+            "/api/eval/dataset",
+            files={"file": ("questions.jsonl", content, "application/x-ndjson")},
+        )
+        assert uploaded.status_code == 200
+        info = uploaded.json()
+        assert info["rows"] == 1
+        assert info["with_ground_truth"] == 1
+
+        status = client.get("/api/eval/status")
+        listed = next(item for item in status.json()["datasets"] if item["id"] == info["id"])
+        assert listed["name"] == "questions"
+
+        started = client.post(
+            "/api/eval/run",
+            json={"label": "custom", "limit": 1, "dataset": info["id"]},
+        )
+
+    assert started.status_code == 200
+    argv = seen["argv"]
+    golden = Path(argv[argv.index("--golden") + 1])
+    assert golden.parent == tmp_path / "eval-datasets"
+    assert json.loads(golden.read_text(encoding="utf-8"))["question"] == "Что такое вольт?"
+
+
+def test_run_rejects_dataset_path_instead_of_joining_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "is_server", lambda: False)
+    monkeypatch.setattr(
+        eval_routes, "resolve_paths", lambda request: AppPaths(root=tmp_path)
+    )
+    monkeypatch.setattr(eval_runner, "available", lambda: True)
+
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/api/eval/run",
+            json={"label": "attack", "dataset": "upload:../../secret.jsonl"},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "EVAL_BAD_DATASET"
+
+
+def _tiny_xlsx() -> bytes:
+    sheet = """<?xml version="1.0" encoding="UTF-8"?>
+    <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+      <sheetData>
+        <row r="1">
+          <c r="A1" t="inlineStr"><is><t>№</t></is></c>
+          <c r="B1" t="inlineStr"><is><t>Кейс</t></is></c>
+          <c r="C1" t="inlineStr"><is><t>Вопрос агенту</t></is></c>
+        </row>
+        <row r="2">
+          <c r="A2" t="n"><v>1</v></c>
+          <c r="B2" t="inlineStr"><is><t>UC8 Вне скоупа</t></is></c>
+          <c r="C2" t="inlineStr"><is><t>Какая завтра погода?</t></is></c>
+        </row>
+      </sheetData>
+    </worksheet>"""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("xl/worksheets/sheet1.xml", sheet)
+    return buffer.getvalue()
+
+
+def test_xlsx_upload_is_converted_without_external_excel_dependency():
+    rows = eval_datasets.parse_upload("questions.xlsx", _tiny_xlsx())
+
+    assert len(rows) == 1
+    assert rows[0]["id"] == "1"
+    assert rows[0]["question"] == "Какая завтра погода?"
+    assert rows[0]["expected_outcome"] == "refusal"
+    assert rows[0]["ground_truth"] == ""
 
 
 def test_status_shape_survives_a_run(tmp_path, monkeypatch):

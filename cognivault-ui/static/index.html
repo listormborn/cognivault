@@ -441,11 +441,21 @@
         <hr class="sep">
         <span class="eyebrow">Оценка качества ответов</span>
         <small class="hint">
-          Прогоняет набор эталонных вопросов через чат и считает метрики. Идёт под вашим
+          Прогоняет выбранный набор вопросов через чат и считает метрики. Идёт под вашим
           токеном и вашими настройками — значит меряет именно вашу конфигурацию.
-          Дорого: около 190 обращений к модели, несколько минут. Абсолютным числам судьи
-          верить нельзя — осмысленна только разница между двумя прогонами.
+          На каждый вопрос приходится несколько обращений к модели, поэтому полный прогон
+          может идти долго. Абсолютным числам судьи верить нельзя — осмысленна только
+          разница между двумя прогонами.
         </small>
+        <div class="field">
+          <label for="eval-dataset">Набор вопросов</label>
+          <select class="input" id="eval-dataset"></select>
+          <small class="hint" id="eval-dataset-info">Можно загрузить JSONL или Excel (.xlsx).</small>
+        </div>
+        <input type="file" id="eval-file" accept=".jsonl,.xlsx" hidden>
+        <div class="section-actions">
+          <button type="button" class="btn ghost" id="eval-upload-btn">Загрузить вопросы</button>
+        </div>
         <div class="field">
           <label for="eval-label">Метка прогона</label>
           <input class="input" id="eval-label" placeholder="after-w5" value="baseline">
@@ -454,7 +464,7 @@
         <div class="field">
           <label for="eval-limit">Сколько пар</label>
           <input class="input" id="eval-limit" type="number" min="0" step="1" value="0">
-          <small class="hint">0 — весь набор (47 пар). Начните с 5, чтобы проверить, что судья отвечает.</small>
+          <small class="hint">0 — весь выбранный набор. Начните с 5, чтобы проверить, что судья отвечает.</small>
         </div>
         <div class="section-actions">
           <button type="button" class="btn ghost" id="eval-btn">Прогнать оценку</button>

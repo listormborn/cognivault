@@ -15,10 +15,10 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, Request
+from fastapi import APIRouter, Body, Depends, File, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
-from .. import eval_runner, settings
+from .. import eval_datasets, eval_runner, settings
 from ..deps import get_token, resolve_paths
 
 log = logging.getLogger("cognivault-ui.eval")
@@ -35,6 +35,35 @@ def _error(status: int, code: str, message: str, detail: str | None = None) -> J
 
 def _reports_dir(request: Request) -> Path:
     return Path(resolve_paths(request).root) / "eval-reports"
+
+
+def _dataset_list(request: Request) -> list[dict[str, Any]]:
+    root = Path(resolve_paths(request).root)
+    return eval_datasets.list_datasets(root, eval_runner.harness_dir())
+
+
+@router.post("/dataset")
+async def upload_dataset(
+    request: Request,
+    file: UploadFile = File(...),
+    _token: str = Depends(get_token),
+) -> Any:
+    """Принять JSONL/XLSX и сохранить нормализованный набор пользователя."""
+    content = await file.read(eval_datasets.MAX_UPLOAD_BYTES + 1)
+    try:
+        info = eval_datasets.save_upload(
+            Path(resolve_paths(request).root), file.filename or "", content
+        )
+    except eval_datasets.DatasetError as exc:
+        return _error(400, "EVAL_BAD_DATASET", str(exc))
+    except OSError as exc:
+        return _error(
+            503,
+            "EVAL_NO_STORAGE",
+            "Некуда сохранить набор вопросов — каталог данных недоступен",
+            str(exc),
+        )
+    return info
 
 
 @router.post("/run")
@@ -72,10 +101,22 @@ async def start_eval(
 
     out_dir = _reports_dir(request)
     paths = resolve_paths(request)
+    dataset_id = str(payload.get("dataset") or "builtin:golden.jsonl")
+    golden = eval_datasets.resolve_dataset(
+        Path(paths.root), eval_runner.harness_dir(), dataset_id
+    )
+    if golden is None:
+        return _error(
+            400,
+            "EVAL_BAD_DATASET",
+            "Набор вопросов не найден",
+            dataset_id,
+        )
     argv = [
         "--label", label,
         "--ui-url", f"http://127.0.0.1:{settings.bind_port()}",
         "--out-dir", str(out_dir),
+        "--golden", str(golden),
         "--limit", str(limit_int),
         # Строго один поток. У судьи на контуре фактически один слот: второй
         # одновременный запрос получает 429 сразу, а ретраи короче чужого вызова.
@@ -119,6 +160,7 @@ async def eval_status(request: Request, _token: str = Depends(get_token)) -> Any
         "available": eval_runner.available(),
         "job": job.to_dict() if job else None,
         "reports": reports,
+        "datasets": _dataset_list(request),
     }
 
 

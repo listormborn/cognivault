@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - emdash/k8s-gigachat-integration-yce22
+      - emdash/k8s-gigachat-integration-yce22-lida
     paths:
       - 'cognivault-ui/**'
       # Харнесс оценки едет в этом же образе (см. Dockerfile) — значит его
