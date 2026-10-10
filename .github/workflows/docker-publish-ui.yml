@@ -61,10 +61,10 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          # NOTE: the resulting ghcr.io/coolcrazycool/cognivault-ui package must be
+          # NOTE: the resulting ghcr.io/<repository-owner>/cognivault-ui package must be
           # made PUBLIC so the SberOSC proxy (sberosc.sigma.sbrf.ru/ghcr.io/...) can
           # pull it without GHCR credentials.
-          images: ghcr.io/coolcrazycool/cognivault-ui
+          images: ghcr.io/${{ github.repository_owner }}/cognivault-ui
           tags: |
             type=sha
             type=ref,event=branch
