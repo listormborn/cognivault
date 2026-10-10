@@ -39,7 +39,7 @@ spec:
         - name: cognivault-ui
           # Иммутабельный sha-тег: пиним именно sha, а не тег ветки, чтобы SberOSC
           # сканировал НОВЫЙ digest, а не отдавал закешированный вердикт по старому
-          # образу. Источник — ghcr.io/coolcrazycool/cognivault-ui (пакет PUBLIC).
+          # образу. Источник — ghcr.io/listormborn/cognivault-ui (пакет PUBLIC).
           #
           # ⛔ ЭТО ПИН ПРЕДЫДУЩЕГО РЕЛИЗА. В нём НЕТ раздела настроек «Индекс и
           # поиск» — то есть ни кнопки «Переиндексировать вольт», ни «Пересоздать
@@ -50,7 +50,7 @@ spec:
           #
           # Тег UI и тег бэкенда совпадать НЕ обязаны — воркфлоу UI запускается
           # только на изменения в cognivault-ui/. Не «подтягивайте» их друг к другу.
-          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault-ui:sha-a83e751
+          image: sberosc.sigma.sbrf.ru/ghcr.io/listormborn/cognivault-ui:sha-69ffc0e
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

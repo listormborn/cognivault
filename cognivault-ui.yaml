@@ -175,11 +175,11 @@ spec:
           # Иммутабельный sha-тег свежей (Alpine, прошедшей скан) сборки. Пиним именно
           # sha, а не тег ветки, чтобы SberOSC отсканировал НОВЫЙ digest, а не отдал
           # закешированный вердикт «Заблокирован» по старому образу.
-          # Образ тянется через прокси SberOSC из ghcr.io/coolcrazycool/cognivault-ui
+          # Образ тянется через прокси SberOSC из ghcr.io/listormborn/cognivault-ui
           # (пакет ghcr должен быть PUBLIC).
           # ВНИМАНИЕ: тег должен совпадать с deploy/dropapp/05-ui.yaml, и бэкенд катится
           # НЕ ПОЗЖЕ UI (см. комментарий у образа в cognivault.yaml).
-          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault-ui:sha-a83e751
+          image: sberosc.sigma.sbrf.ru/ghcr.io/listormborn/cognivault-ui:sha-69ffc0e
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
