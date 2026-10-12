@@ -10,6 +10,7 @@ import time
 from dataclasses import replace
 from datetime import datetime
 from typing import Any, AsyncIterator
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -246,6 +247,58 @@ def _linked_candidates(
         item["id"] = item.get("id") or grade.get("id") or i + 1
         out.append(item)
     return out
+
+
+def _safe_page_url(value: Any) -> str | None:
+    """Return an absolute HTTP(S) page URL, rejecting unsafe metadata values."""
+    text = str(value or "").strip()
+    try:
+        parsed = urlsplit(text)
+    except ValueError:
+        return None
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return None
+    return text
+
+
+async def _enrich_source_urls(
+    sources: list[dict[str, Any]],
+    manifest_urls: dict[str, str],
+    cv: dict[str, Any] | None,
+) -> None:
+    """Attach durable Confluence links to RAG sources in place.
+
+    The sync manifest is the cheap first choice, but it can disappear when an
+    OpenShift pod backed by ``emptyDir`` is replaced. For sources absent from
+    that manifest, read ``source_url`` from the document frontmatter through
+    CogniVault. Lookups run in parallel and never make an answer fail.
+    """
+    unresolved: list[dict[str, Any]] = []
+    for source in sources:
+        path = str(source.get("path") or "")
+        url = _safe_page_url(source.get("url")) or _safe_page_url(
+            manifest_urls.get(path)
+        )
+        if url:
+            source["url"] = url
+        elif path:
+            unresolved.append(source)
+
+    async def from_frontmatter(source: dict[str, Any]) -> None:
+        try:
+            meta = await cognivault.metadata(str(source["path"]), cv=cv)
+            url = _safe_page_url(meta.get("source_url"))
+            if url:
+                source["url"] = url
+        except Exception:  # noqa: BLE001 — source links are best-effort
+            log.debug(
+                "не удалось получить source_url для %s",
+                source.get("path"),
+                exc_info=True,
+            )
+
+    if unresolved:
+        await asyncio.gather(*(from_frontmatter(source) for source in unresolved))
 
 
 def _chunk_indexes_for(
@@ -555,14 +608,11 @@ async def chat(request: Request) -> Any:
                             context_text = _rendered_context(
                                 ctx.user_message, context_chars
                             )
-                            # Attach a Confluence page url to any source whose vault
-                            # path is a synced Confluence page (absent otherwise).
-                            # Mutates the source dicts in place so the persisted
-                            # history keeps the link.
-                            for source in sources:
-                                u = url_index.get(source.get("path"))
-                                if u:
-                                    source["url"] = u
+                            # The manifest is fast but ephemeral; frontmatter in
+                            # the vault is the durable fallback after a pod
+                            # replacement. Mutation is intentional so persisted
+                            # chat history keeps the resolved links.
+                            await _enrich_source_urls(sources, url_index, cv)
                             yield format_sse(
                                 "sources",
                                 {"sources": sources, "context_chars": context_chars},

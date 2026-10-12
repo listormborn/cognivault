@@ -379,3 +379,61 @@ def test_chat_sources_carry_confluence_url(tmp_path, monkeypatch):
         "https://confluence.example.com/pages/viewpage.action?pageId=12345"
     )
     assert "url" not in by_path["notes/local.md"]
+
+
+def test_chat_sources_fall_back_to_frontmatter_url(tmp_path, monkeypatch):
+    """Links survive when a pod replacement has removed the UI manifest."""
+    paths = _paths(tmp_path)
+    monkeypatch.setattr(chat_routes, "resolve_paths", lambda request: paths)
+
+    sources = [
+        {"n": 1, "title": "Conf", "path": "Confluence/Space/Page.md",
+         "section_path": "", "score": 0.9, "depth": "chunk"},
+    ]
+
+    async def fake_build_rag_context(query, *args, **kwargs):
+        return rag.RagContext(
+            system_message={"role": "system", "content": "правила"},
+            user_message={"role": "user", "content": f"Источники:\n\nВопрос: {query}"},
+            sources=sources,
+            context_chars=3,
+        )
+
+    async def fake_metadata(path, cv=None):
+        assert path == "Confluence/Space/Page.md"
+        return {
+            "source": "confluence",
+            "source_url": "https://confluence.example.com/pages/viewpage.action?pageId=77",
+        }
+
+    async def fake_stream_chat(messages, gcfg):
+        yield "ответ [Источник 1]"
+
+    monkeypatch.setattr(chat_routes.rag, "build_rag_context", fake_build_rag_context)
+    monkeypatch.setattr(chat_routes.cognivault, "metadata", fake_metadata)
+    monkeypatch.setattr(chat_routes.llm, "stream_chat", fake_stream_chat)
+    monkeypatch.setattr(chat_routes.llm, "files_present", lambda gcfg: None)
+
+    with TestClient(create_app()) as client:
+        resp = client.post(
+            "/api/chat",
+            json={"messages": [{"role": "user", "content": "вопрос"}], "rag": True},
+        )
+
+    assert resp.status_code == 200
+    events = dict(_parse_sse(resp.text))
+    assert events["sources"]["sources"][0]["url"] == (
+        "https://confluence.example.com/pages/viewpage.action?pageId=77"
+    )
+
+
+def test_source_url_enrichment_rejects_unsafe_frontmatter(monkeypatch):
+    source = {"n": 1, "path": "Confluence/Page.md"}
+
+    async def fake_metadata(path, cv=None):
+        return {"source_url": "javascript:alert(1)"}
+
+    monkeypatch.setattr(chat_routes.cognivault, "metadata", fake_metadata)
+    asyncio.run(chat_routes._enrich_source_urls([source], {}, None))
+
+    assert "url" not in source

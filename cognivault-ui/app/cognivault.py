@@ -189,6 +189,29 @@ async def content(path: str, cv: dict[str, Any] | None = None) -> str:
     return str(data.get("content", "") or "")
 
 
+async def metadata(path: str, cv: dict[str, Any] | None = None) -> dict[str, Any]:
+    """GET ``/api/vault/metadata?path=<path>`` and return its metadata object.
+
+    Confluence sync stores the original page URL in Markdown frontmatter as
+    ``source_url``. Unlike the UI-side sync manifest, that metadata travels
+    with the vault document and therefore survives a UI pod replacement.
+    """
+    base, token = _resolve_cv(cv)
+    url = f"{base}/api/vault/metadata"
+    headers = _auth_headers(token)
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.get(url, params={"path": path}, headers=headers)
+    if resp.status_code != 200:
+        raise CogniVaultError(
+            f"metadata failed ({resp.status_code})",
+            resp.status_code,
+            _excerpt(resp.text),
+        )
+    data = resp.json()
+    value = data.get("metadata", {}) if isinstance(data, dict) else {}
+    return value if isinstance(value, dict) else {}
+
+
 async def context(
     query: str,
     token_budget: int,
