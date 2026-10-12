@@ -50,7 +50,7 @@ spec:
           #
           # Тег UI и тег бэкенда совпадать НЕ обязаны — воркфлоу UI запускается
           # только на изменения в cognivault-ui/. Не «подтягивайте» их друг к другу.
-          image: sberosc.sigma.sbrf.ru/ghcr.io/listormborn/cognivault-ui:sha-731be89
+          image: sberosc.sigma.sbrf.ru/ghcr.io/listormborn/cognivault-ui:sha-cb0fe90
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
