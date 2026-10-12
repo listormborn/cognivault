@@ -53,6 +53,13 @@ _SSE_HEADERS = {
 # вызывался — значит подставить его `last_finish_reason` нечем, код наш.
 _NO_CONTEXT_FINISH_REASON = "no_context"
 
+# Технический сбой ретрива — не «в базе ничего нет»: такой ход исключается из
+# eval как ошибка и никогда не отправляется модели без источников.
+_RETRIEVAL_ERROR_CODE = "RETRIEVAL_UNAVAILABLE"
+_RETRIEVAL_ERROR_MESSAGE = (
+    "Не удалось выполнить поиск по базе знаний. Попробуйте повторить запрос."
+)
+
 # Причина повтора генерации в записи лога (`answer_retry_reason`).
 _EMPTY_LENGTH_RETRY_REASON = "empty_length"
 
@@ -584,11 +591,22 @@ async def chat(request: Request) -> Any:
                         )
                         return
 
-                    # Сбой поиска (`notice`) — единственная ветка, где системный
-                    # турн не подставляется: жаловаться уже есть на что, а правил
-                    # для ответа без источников RAG-слой в этом случае не даёт.
+                    # Сбой поиска — терминальная техническая ошибка. Раньше код
+                    # продолжал с исходной историей и вызывал модель БЕЗ
+                    # источников: на вопрос про статус финэффекта она уверенно
+                    # выдумала четырёхтысячезнаковый ответ. Fail closed: никакой
+                    # генерации, ошибка уезжает отдельным SSE-кадром и eval
+                    # исключает такой ход из метрик качества.
                     if ctx.notice:
-                        yield format_sse("notice", {"message": ctx.notice})
+                        errored = True
+                        finish_reason = "retrieval_unavailable"
+                        log.warning("chat %s: %s", chat_id, ctx.notice)
+                        yield sse_error(
+                            _RETRIEVAL_ERROR_CODE,
+                            _RETRIEVAL_ERROR_MESSAGE,
+                            ctx.notice,
+                        )
+                        return
                     elif ctx.system_message is not None:
                         # Системный турн ставится ВСЕГДА, когда он есть, даже без
                         # `user_message`: у `smalltalk`/`clarify` источников нет,

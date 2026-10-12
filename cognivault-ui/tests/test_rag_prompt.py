@@ -580,6 +580,7 @@ def test_cap_applies_to_expanded_files_too(monkeypatch):
 def test_no_results_yields_empty_context(monkeypatch):
     _install_retrieval(monkeypatch, [])
     ctx = _build("вопрос, на который ничего не находится", [])
+    assert ctx.answer_override == rag._NO_ANSWER
     assert (ctx.system_message, ctx.user_message, ctx.sources, ctx.notice) == (
         None, None, [], None
     )

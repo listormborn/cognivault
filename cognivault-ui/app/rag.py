@@ -217,7 +217,7 @@ _CONTEXT_REMINDER = CONTEXT_REMINDER
 # Keys of the ``prompts`` config section, in the order the UI shows them.
 PROMPT_KEYS = ("system", "context_reminder")
 
-_RETRIEVAL_UNAVAILABLE = "Поиск по базе недоступен — отвечаю без контекста"
+_RETRIEVAL_UNAVAILABLE = "Не удалось выполнить поиск по базе знаний"
 
 # Canned answer when the grader judged every candidate irrelevant: generating
 # from noise is worse than an honest "no".
@@ -980,8 +980,16 @@ async def _build_auto(
         f for f in fragments if _passes_min_score(f.get("score"), min_score)
     ]
     if not fragments:
+        # Успешный поиск с пустой выдачей — это штатное «ответа в базе нет»,
+        # а не разрешение отправить вопрос модели без источников. Иначе модель
+        # отвечает из параметрической памяти и такой ответ внешне неотличим от
+        # нормального RAG-ответа.
         return RagContext(
-            intent=intent, standalone_question=rq, scope=scope, hidden_calls=hidden
+            answer_override=_NO_ANSWER,
+            intent=intent,
+            standalone_question=rq,
+            scope=scope,
+            hidden_calls=hidden,
         )
 
     candidates = [
@@ -1249,7 +1257,7 @@ async def _build_legacy(
         f for f in fragments if _passes_min_score(f.get("score"), min_score)
     ]
     if not fragments:
-        return RagContext()
+        return RagContext(answer_override=_NO_ANSWER)
 
     blocks: list[str] = []
     sources: list[dict[str, Any]] = []

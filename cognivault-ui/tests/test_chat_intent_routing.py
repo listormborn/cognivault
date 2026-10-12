@@ -464,20 +464,25 @@ def test_log_carries_no_secrets_from_context(tmp_path, monkeypatch):
 
 
 def test_notice_branch_still_wins_over_sources(tmp_path, monkeypatch):
-    """Сбой поиска: `notice` вместо `sources`, генерация по истории как есть."""
+    """Сбой поиска: терминальная ошибка, модель без источников не вызывается."""
     paths = _paths(tmp_path)
     ctx = _ctx(notice="Поиск недоступен", intent="kb_question", standalone_question="ЕФС")
-    _install(monkeypatch, paths, ctx)
+    calls = _install(monkeypatch, paths, ctx)
 
     with TestClient(create_app()) as client:
         resp = _post(client, [{"role": "user", "content": "как настроить ЕФС?"}])
 
     events = _events(resp.text)
-    assert events == ["meta", "notice", "token", "done"]
+    assert events == ["meta", "error"]
+    error = _parse_sse(resp.text)[-1][1]
+    assert error["code"] == "RETRIEVAL_UNAVAILABLE"
+    assert "повторить запрос" in error["message"]
+    assert [call["kind"] for call in calls] == ["rag"]
     rec = rag_log.read_records(paths)[0]
     assert rec["notice"] == "Поиск недоступен"
     assert rec["rag_used"] is False
     assert rec["intent"] == "kb_question"
+    assert rec["errored"] is True
 
 
 # --------------------------------------------------------------------------- #
