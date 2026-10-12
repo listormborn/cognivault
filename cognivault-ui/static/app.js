@@ -140,6 +140,7 @@
     reindexConsole: $("reindex-console"),
     evalBlock: $("eval-block"),
     evalBtn: $("eval-btn"),
+    evalStopBtn: $("eval-stop-btn"),
     evalDataset: $("eval-dataset"),
     evalDatasetInfo: $("eval-dataset-info"),
     evalFile: $("eval-file"),
@@ -1831,6 +1832,7 @@
     const bits = ["Прогон «" + job.label + "»"];
     if (job.status === "running") bits.push("идёт " + clock + " — страницу можно закрыть");
     else if (job.status === "completed") bits.push("готов за " + clock);
+    else if (job.status === "cancelled") bits.push("остановлен через " + clock);
     else bits.push("не удался за " + clock + (job.error ? ": " + job.error : ""));
     dom.evalProgress.hidden = false;
     dom.evalProgress.textContent = bits.join(" · ");
@@ -1844,6 +1846,11 @@
     if (dom.evalBtn) {
       dom.evalBtn.disabled = job.status === "running";
       dom.evalBtn.textContent = job.status === "running" ? "Прогон идёт…" : "Прогнать оценку";
+    }
+    if (dom.evalStopBtn) {
+      dom.evalStopBtn.hidden = job.status !== "running";
+      dom.evalStopBtn.disabled = false;
+      dom.evalStopBtn.textContent = "Остановить прогон";
     }
   }
 
@@ -1868,9 +1875,32 @@
       // Раз в 5 секунд: прогон идёт минутами, чаще опрашивать незачем.
       state.evalTimer = setTimeout(pollEval, 5000);
     } else {
-      toast(st.job.status === "completed" ? "ok" : "err",
-            st.job.status === "completed" ? "Прогон завершён" : "Прогон не удался",
+      const cancelled = st.job.status === "cancelled";
+      toast(st.job.status === "completed" ? "ok" : (cancelled ? "warn" : "err"),
+            st.job.status === "completed" ? "Прогон завершён" :
+              (cancelled ? "Прогон остановлен" : "Прогон не удался"),
             st.job.error || "Отчёты внизу раздела");
+    }
+  }
+
+  async function stopEval() {
+    if (!confirm("Остановить текущий прогон? Новый полный отчёт создан не будет.")) return;
+    if (dom.evalStopBtn) {
+      dom.evalStopBtn.disabled = true;
+      dom.evalStopBtn.textContent = "Останавливаю…";
+    }
+    try {
+      const job = await apiSend("/api/eval/stop", "POST");
+      stopEvalPoll();
+      renderEvalJob(job);
+      const st = await apiGet("/api/eval/status");
+      renderEvalReports(st.reports || []);
+      toast("warn", "Прогон остановлен", "Можно изменить настройки и запустить его снова");
+    } catch (e) {
+      if (!e.handled) toast("err", "Не удалось остановить прогон", e.message);
+      // Сервер мог успеть завершить прогон между нажатием и запросом — статус
+      // рассудит и вернёт кнопки в правильное состояние.
+      pollEval();
     }
   }
 
@@ -2709,6 +2739,7 @@
     // index maintenance — same null-guard discipline as the Confluence block
     if (dom.reindexBtn) dom.reindexBtn.addEventListener("click", startReindex);
     if (dom.evalBtn) dom.evalBtn.addEventListener("click", startEval);
+    if (dom.evalStopBtn) dom.evalStopBtn.addEventListener("click", stopEval);
     if (dom.evalDataset) dom.evalDataset.addEventListener("change", renderEvalDatasetInfo);
     if (dom.evalUploadBtn && dom.evalFile) {
       dom.evalUploadBtn.addEventListener("click", () => dom.evalFile.click());

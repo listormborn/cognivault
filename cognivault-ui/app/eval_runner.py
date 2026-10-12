@@ -70,7 +70,7 @@ class EvalJob:
     """Состояние одного прогона. Живёт в памяти процесса."""
 
     label: str
-    status: str = "running"  # running | completed | failed
+    status: str = "running"  # running | completed | failed | cancelled
     started_at: float = field(default_factory=time.time)
     finished_at: float | None = None
     lines: list[str] = field(default_factory=list)
@@ -227,6 +227,33 @@ class EvalRunner:
         self._task = asyncio.create_task(self._run(job, argv))
         return job
 
+    async def stop(self) -> EvalJob:
+        """Остановить текущий прогон и дождаться освобождения его ресурсов.
+
+        Простого ``Task.cancel()`` недостаточно: маршрут остановки должен вернуть
+        уже окончательный статус, а ``main_async`` обязан успеть закрыть HTTP-
+        клиенты чата, судьи и бэкенда в своём ``finally``.
+        """
+        job = self._job
+        task = self._task
+        if job is None or job.status != "running" or task is None or task.done():
+            raise RuntimeError("активного прогона нет")
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            # `_run` намеренно пробрасывает отмену после фиксации статуса и
+            # закрытия ресурсов. Для HTTP-маршрута это штатный исход.
+            pass
+        # Если отмена прилетела до первого такта `_run`, его `except/finally`
+        # ещё не успели выполниться. Без этой страховки задача уже мертва, а UI
+        # навсегда видит `running` и не даёт запустить следующий прогон.
+        if job.status == "running":
+            job.status = "cancelled"
+            job.error = "остановлен пользователем"
+            job.finished_at = time.time()
+        return job
+
     async def _run(self, job: EvalJob, argv: list[str]) -> None:
         sink = _JobLog(job, log_file(Path(job.out_dir), job.label) if job.out_dir else None)
         root = logging.getLogger()
@@ -247,8 +274,8 @@ class EvalRunner:
                 job.status = "failed"
                 job.error = f"харнесс вернул код {code}"
         except asyncio.CancelledError:
-            job.status = "failed"
-            job.error = "прогон отменён"
+            job.status = "cancelled"
+            job.error = "остановлен пользователем"
             raise
         except Exception as exc:  # noqa: BLE001 — фон не должен ронять процесс
             job.status = "failed"

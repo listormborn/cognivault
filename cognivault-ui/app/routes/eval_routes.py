@@ -164,6 +164,24 @@ async def eval_status(request: Request, _token: str = Depends(get_token)) -> Any
     }
 
 
+@router.post("/stop")
+async def stop_eval(request: Request, _token: str = Depends(get_token)) -> Any:
+    """Остановить активный прогон текущего пользователя."""
+    job = eval_runner.RUNNER.job
+    if job is None or job.status != "running":
+        return _error(409, "EVAL_NOT_RUNNING", "Активного прогона нет")
+    # RUNNER один на процесс. Не даём пользователю остановить чужой прогон,
+    # даже если он увидел глобальный статус раньше владельца задачи.
+    if Path(job.out_dir) != _reports_dir(request):
+        return _error(403, "EVAL_FORBIDDEN", "Этот прогон запущен другим пользователем")
+    try:
+        stopped = await eval_runner.RUNNER.stop()
+    except RuntimeError as exc:
+        return _error(409, "EVAL_NOT_RUNNING", str(exc))
+    log.info("eval: прогон %r остановлен пользователем", stopped.label)
+    return stopped.to_dict()
+
+
 @router.get("/report")
 async def eval_report(
     request: Request, name: str = "", _token: str = Depends(get_token)

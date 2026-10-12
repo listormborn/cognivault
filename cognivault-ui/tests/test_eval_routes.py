@@ -150,6 +150,112 @@ def test_second_run_is_refused_while_the_first_is_alive(tmp_path, monkeypatch):
     assert eval_runner.RUNNER.job.label == "first"
 
 
+def test_running_job_can_be_cancelled_and_resources_are_released(tmp_path, monkeypatch):
+    """Остановка — отдельный штатный исход, а не красная ошибка прогона."""
+    started = asyncio.Event()
+    closed = asyncio.Event()
+
+    class Slow:
+        LOG_SINK = None
+
+        @staticmethod
+        async def main_async(argv):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                closed.set()
+
+    monkeypatch.setattr(eval_runner, "_load_harness", lambda: Slow)
+
+    async def go():
+        job = eval_runner.RUNNER.start(label="first", argv=[], out_dir=tmp_path / "rep")
+        await started.wait()
+        stopped = await eval_runner.RUNNER.stop()
+        assert stopped is job
+        assert closed.is_set()
+        assert job.status == "cancelled"
+        assert job.error == "остановлен пользователем"
+        assert job.finished_at is not None
+        assert not eval_runner.RUNNER.busy()
+
+    asyncio.run(go())
+
+
+def test_job_cancelled_before_first_runner_tick_does_not_stay_running(
+    tmp_path, monkeypatch
+):
+    class NeverStarted:
+        LOG_SINK = None
+
+        @staticmethod
+        async def main_async(argv):
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(eval_runner, "_load_harness", lambda: NeverStarted)
+
+    async def go():
+        job = eval_runner.RUNNER.start(label="instant", argv=[], out_dir=tmp_path / "rep")
+        # Не отдаём цикл `_run`: stop отменяет только что созданную Task.
+        stopped = await eval_runner.RUNNER.stop()
+        assert stopped is job
+        assert job.status == "cancelled"
+        assert job.finished_at is not None
+        assert not eval_runner.RUNNER.busy()
+
+    asyncio.run(go())
+
+
+def test_stop_without_a_running_job_is_rejected():
+    async def go():
+        with pytest.raises(RuntimeError, match="активного прогона нет"):
+            await eval_runner.RUNNER.stop()
+
+    asyncio.run(go())
+
+
+def test_stop_route_returns_the_cancelled_job(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "is_server", lambda: False)
+    monkeypatch.setattr(
+        eval_routes, "resolve_paths", lambda request: AppPaths(root=tmp_path)
+    )
+    job = eval_runner.EvalJob(
+        label="baseline", out_dir=str(tmp_path / "eval-reports")
+    )
+    eval_runner.RUNNER._job = job
+
+    async def fake_stop():
+        job.status = "cancelled"
+        job.error = "остановлен пользователем"
+        job.finished_at = job.started_at + 1
+        return job
+
+    monkeypatch.setattr(eval_runner.RUNNER, "stop", fake_stop)
+
+    with TestClient(create_app()) as client:
+        response = client.post("/api/eval/stop")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+    assert response.json()["error"] == "остановлен пользователем"
+
+
+def test_stop_route_rejects_another_users_job(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "is_server", lambda: False)
+    monkeypatch.setattr(
+        eval_routes, "resolve_paths", lambda request: AppPaths(root=tmp_path / "mine")
+    )
+    eval_runner.RUNNER._job = eval_runner.EvalJob(
+        label="foreign", out_dir=str(tmp_path / "other" / "eval-reports")
+    )
+
+    with TestClient(create_app()) as client:
+        response = client.post("/api/eval/stop")
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "EVAL_FORBIDDEN"
+
+
 def test_log_is_tailed_so_a_long_run_does_not_bloat_the_response(tmp_path, monkeypatch):
     job = eval_runner.EvalJob(label="t")
     job.lines = [f"строка {i}" for i in range(500)]
