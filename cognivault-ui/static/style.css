@@ -93,8 +93,10 @@ button,input,textarea,select{font:inherit;color:inherit}
 .thread{max-width:var(--measure);margin:0 auto;display:flex;flex-direction:column;gap:18px}
 
 .welcome{max-width:var(--measure);margin:8vh auto 0;text-align:center;display:flex;flex-direction:column;align-items:center;gap:14px}
+.welcome-role{color:var(--accent);font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
 .welcome h2{font-family:var(--font-display);font-weight:700;font-size:22px;margin:0}
 .welcome p{color:var(--fg-muted);margin:0;max-width:460px}
+.welcome .welcome-topics{max-width:620px;color:var(--fg);font-size:13px}
 .suggestions{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;margin-top:6px}
 .suggestion{padding:9px 14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-pill);cursor:pointer;font-size:13px}
 .suggestion:hover{border-color:var(--accent);color:var(--accent)}

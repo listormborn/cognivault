@@ -645,6 +645,7 @@
     applyServerConfig();
     refreshStatus();
     loadHistory();
+    if (state.chatId === null && !state.messages.length) renderWelcome();
   }
 
   function logout() {
@@ -2155,10 +2156,14 @@
   function renderWelcome() {
     dom.thread.textContent = "";
     const w = el("div", "welcome");
-    w.appendChild(el("h2", null, "Чем помочь?"));
-    w.appendChild(el("p", null, "Задайте вопрос про внутренние регламенты и документы. Ответы формируются на основе вашей базы знаний."));
+    w.appendChild(el("div", "welcome-role", "Ассистент"));
+    w.appendChild(el("h2", null, "Здравствуйте! Я помогу найти ответ в базе знаний."));
+    w.appendChild(el("p", null, "Задайте вопрос о доступах, процессах, инструментах или описанных системах. Я отвечу по документам и покажу источники, а если информации нет — прямо об этом скажу."));
+    const topics = el("p", "welcome-topics", "");
+    topics.hidden = true;
+    w.appendChild(topics);
     const sug = el("div", "suggestions");
-    ["Что говорит регламент об отпусках?", "Как оформить командировку?", "Кратко изложи политику информационной безопасности"].forEach((txt) => {
+    ["О чем я могу тебя спросить?", "Какие разделы есть в базе знаний?"].forEach((txt) => {
       const b = el("button", "suggestion", txt);
       b.type = "button";
       b.addEventListener("click", () => { dom.input.value = txt; autoGrow(); dom.input.focus(); });
@@ -2166,6 +2171,41 @@
     });
     w.appendChild(sug);
     dom.thread.appendChild(w);
+    loadWelcomeTopics(w, topics, sug);
+  }
+
+  async function loadWelcomeTopics(welcome, topicsNode, suggestionsNode) {
+    // The first render happens before /api/config is loaded. In server mode a
+    // catalogue request at that point would be an expected 401, so wait for the
+    // authenticated re-render in onLoggedIn().
+    if (!state.config || (isServerMode() && !getToken())) return;
+    try {
+      const data = await apiGet("/api/welcome");
+      if (!welcome.isConnected || state.chatId !== null || state.messages.length) return;
+      const names = data && Array.isArray(data.topics)
+        ? data.topics.filter((name) => typeof name === "string" && name.trim()).slice(0, 8)
+        : [];
+      if (!names.length) return;
+      const total = Number.isInteger(data.total) && data.total >= 0
+        ? " (" + data.total.toLocaleString("ru-RU") + " док.)"
+        : "";
+      topicsNode.textContent = "Разделы в вашей базе" + total + ": " + names.join(", ") + ".";
+      topicsNode.hidden = false;
+      names.slice(0, 3).forEach((name) => {
+        const text = "Расскажи о разделе «" + name + "»";
+        const button = el("button", "suggestion", text);
+        button.type = "button";
+        button.addEventListener("click", () => {
+          dom.input.value = text;
+          autoGrow();
+          dom.input.focus();
+        });
+        suggestionsNode.appendChild(button);
+      });
+    } catch (_) {
+      // Greeting is deliberately best-effort: an unavailable/older backend
+      // leaves the useful static text and must never show an error toast.
+    }
   }
 
   function addMessageNode(role, contentHtmlOrText, opts) {
@@ -2783,6 +2823,7 @@
     } else {
       // Local mode: unchanged behavior.
       bindConfigToForm();
+      if (state.chatId === null && !state.messages.length) renderWelcome();
       await refreshStatus();
       await loadHistory();
     }

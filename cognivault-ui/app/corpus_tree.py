@@ -534,6 +534,28 @@ def render_overview(
     )
 
 
+def top_level_titles(
+    data: dict[str, Any] | None, *, limit: int = 8
+) -> list[str]:
+    """Return real top-level section names for lightweight UI navigation.
+
+    The same corridor folding as the model-facing tree is load-bearing here:
+    showing ``Confluence`` or a space key as a suggested topic would expose
+    storage layout rather than tell the user what the base contains. Invalid,
+    unavailable and empty catalogues deliberately produce an empty list so the
+    caller can retain its static fallback without inventing sections.
+    """
+    if limit <= 0:
+        return []
+    prepared = _prepare(data)
+    if prepared is None:
+        return []
+    roots = prepared[0]
+    return [node.name for node in sorted(roots, key=lambda node: node.name.lower())][
+        :limit
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # Entry points
 # --------------------------------------------------------------------------- #

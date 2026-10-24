@@ -34,6 +34,7 @@ from .routes import (
     feedback_routes,
     history_routes,
     upload_routes,
+    welcome_routes,
 )
 
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
@@ -172,6 +173,9 @@ def create_app() -> FastAPI:
     app.include_router(history_routes.router, dependencies=auth)
     app.include_router(feedback_routes.router, dependencies=auth)
     app.include_router(upload_routes.router, dependencies=auth)
+    # Empty-chat greeting: real top-level corpus sections, no LLM call. It is
+    # authenticated because the catalogue is tenant-specific.
+    app.include_router(welcome_routes.router, dependencies=auth)
     # Index maintenance (reindex / collection rebuild). Both modes: the operator
     # has no shell or vector-DB access, so the drawer is the only surface.
     app.include_router(admin_routes.router, dependencies=auth)
