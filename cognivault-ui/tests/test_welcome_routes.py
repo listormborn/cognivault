@@ -58,7 +58,6 @@ def _payload() -> dict:
 
 def test_top_level_titles_fold_storage_corridor() -> None:
     assert corpus_tree.top_level_titles(_payload()) == [
-        "Архив",
         "База знаний",
         "Продукты",
     ]
@@ -74,8 +73,8 @@ def test_welcome_returns_real_topics_without_summaries(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json() == {
         "catalog_available": True,
-        "topics": ["Архив", "База знаний", "Продукты"],
-        "total": 4,
+        "topics": ["База знаний", "Продукты"],
+        "total": 3,
     }
     assert "summary" not in response.text
 

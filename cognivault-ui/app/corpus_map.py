@@ -44,6 +44,7 @@ Design constraints, all load-bearing:
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -93,6 +94,11 @@ _CACHE_TTL_SECONDS = 300.0
 _CACHE_TTL_FAILURE_SECONDS = 60.0
 _CACHE_CAP = 256
 _LIST_TIMEOUT = 5.0
+
+# Archived branches are intentionally absent from every user-facing map and
+# count. The backend may retain them in its index, but the active catalogue must
+# not advertise them as available knowledge.
+_ARCHIVE_RE = re.compile(r"(?:^|\W)(?:архив|archive[ds]?|deprecated|устаревш)", re.I)
 
 # The two fixed sentences around the numbers.
 #
@@ -171,6 +177,8 @@ def _documents(paths: list[Any], extensions: frozenset[str]) -> list[list[str]]:
             s for s in raw.replace("\\", "/").strip().split("/") if s and s != "."
         ]
         if not segments:
+            continue
+        if any(_ARCHIVE_RE.search(segment) for segment in segments):
             continue
         name = segments[-1]
         ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""

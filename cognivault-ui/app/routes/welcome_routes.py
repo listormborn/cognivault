@@ -13,13 +13,6 @@ router = APIRouter(prefix="/api", tags=["welcome"])
 _TOPIC_LIMIT = 8
 
 
-def _total(data: dict[str, Any]) -> int:
-    raw = data.get("total")
-    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
-        return raw
-    return len(catalog.documents_of(data))
-
-
 @router.get("/welcome")
 async def welcome(request: Request) -> dict[str, Any]:
     """Describe the caller's indexed corpus without invoking KitAI/GigaChat.
@@ -34,5 +27,5 @@ async def welcome(request: Request) -> dict[str, Any]:
     return {
         "catalog_available": True,
         "topics": corpus_tree.top_level_titles(data, limit=_TOPIC_LIMIT),
-        "total": _total(data),
+        "total": len(corpus_tree.active_documents(data)),
     }

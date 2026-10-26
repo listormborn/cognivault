@@ -116,15 +116,15 @@ def test_block_reports_totals_and_top_sections():
     block = corpus_map.render(_corpus(), n_sources=5, extensions=frozenset(_EXTENSIONS))
 
     assert block is not None
-    # 54 + 31 + 24 + 14 + 4 корневых = 127; вложения не в счёт.
-    assert "Всего документов в базе: 127." in block
+    # Архивные 31 и вложения не входят в активную базу: 54 + 24 + 14 + 4 = 96.
+    assert "Всего документов в базе: 96." in block
     assert "Ниже в блоке «Источники» — 5 фрагментов" in block
     # Разделы верхнего уровня с числом документов, по убыванию объёма.
     assert "- Продукты — 54" in block
-    assert "- Архив — 31" in block
+    assert "Архив" not in block
     assert "- Регламенты — 24" in block
     assert "- (корень) — 4" in block
-    assert block.index("- Продукты") < block.index("- Архив") < block.index("- Процессы")
+    assert block.index("- Продукты") < block.index("- Процессы")
     # Подразделы — со своими счётчиками.
     assert "Fincert: 9" in block
     # Явная пометка: не источник, ссылаться нельзя.
@@ -189,14 +189,14 @@ def test_descent_continues_through_every_single_folder_level():
     block = corpus_map.render(paths, n_sources=5, extensions=frozenset(_EXTENSIONS))
 
     assert block is not None
-    assert "Всего документов в базе: 127." in block
+    assert "Всего документов в базе: 116." in block
     # Все четыре коридора уехали в заголовок, а разделы — настоящие.
     assert "Разделы внутри «Confluence/OASISEXT/OASIS External Home/Разработка»" in block
     assert "- Продукты — 110" in block
-    assert "- Архив — 10" in block
+    assert "Архив" not in block
     assert "- База знаний — 3" in block
     # Страницы-разделы, лежащие рядом с папками, остаются видны как «(корень)».
-    assert "- (корень) — 3" in block
+    assert "- (корень) — 2" in block
     assert len(block) <= corpus_map._MAX_MAP_CHARS
 
 

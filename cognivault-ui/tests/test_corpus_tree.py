@@ -170,20 +170,18 @@ def test_empty_container_pages_are_marked():
     assert "- База знаний [раздел: 3]" in block
 
 
-def test_archive_branch_is_marked_once_at_its_root():
+def test_archive_branch_is_hidden_from_the_active_tree():
     block = corpus_tree.render(_payload())
 
-    assert "- Архив [архив, раздел: 2, пусто]" in block
-    # Внутри архива пометка не повторяется на каждой строке — её несёт отступ.
-    tree = block[block.index("- Архив") :]
-    assert tree.count("[архив") == 1
-    assert "  - Проекты Ислама" in block
+    assert "Архив" not in block
+    assert "Проекты Ислама" not in block
 
 
 def test_legend_explains_only_the_markers_that_occur():
     """Объяснять пометку, которой в выводе нет, — чистая трата символов."""
     full = corpus_tree.render(_payload())
-    assert "[архив]" in full and "[пусто]" in full and "[раздел: N]" in full
+    assert "[архив]" not in full
+    assert "[пусто]" in full and "[раздел: N]" in full
 
     # Корпус без единой пометки не платит и за легенду.
     plain = corpus_tree.render(
@@ -834,7 +832,6 @@ def test_the_request_record_says_what_opened_the_turn(
 
 _TOPIC_QUALIFIED = (
     "Какие витрины ClickHouse описаны в базе?",
-    "Что лежит в разделе «Архив»?",
     "Какие страницы входят в раздел «База знаний»?",
     "Какие пользовательские инструкции есть в базе?",
 )
@@ -842,10 +839,10 @@ _TOPIC_QUALIFIED = (
 
 def test_topic_qualified_questions_stay_in_retrieval():
     """Шаг 2 их специально не ловит: шаблон такой ширины начал бы ловить класс B."""
-    assert [corpus_scope.match_meta(q) for q in _TOPIC_QUALIFIED] == [None] * 4
+    assert [corpus_scope.match_meta(q) for q in _TOPIC_QUALIFIED] == [None] * 3
 
 
-def test_the_tree_contains_what_those_four_questions_ask_for(monkeypatch):
+def test_the_tree_contains_what_those_three_questions_ask_for(monkeypatch):
     _install(monkeypatch, [_hit(f"{_ROOT}/Продукты/Fincert.md", 1)])
     content = _build("Какие витрины ClickHouse описаны в базе?", True).user_message[
         "content"
@@ -855,8 +852,8 @@ def test_the_tree_contains_what_those_four_questions_ask_for(monkeypatch):
     #    этого списка не содержит.
     assert "- ClickHouse [раздел: 3, пусто]" in content
     assert "Данные по резолюциям (afpc_inc_distr.resolutions_safp)" in content
-    # 2. Раздел «Архив» — с пометкой, что он архивный.
-    assert "- Архив [архив, раздел: 2, пусто]" in content
+    # 2. Архивные ветки не показываются как доступные знания.
+    assert "Архив" not in content
     # 3. «База знаний» — все три страницы, хотя сама страница-оглавление
     #    перечисляет не все.
     assert "- Инструкция по работе с CTL" in content

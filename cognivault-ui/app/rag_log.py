@@ -250,7 +250,6 @@ _RAG_SNAPSHOT_KEYS = (
     "condense_enabled",
     "condense_first_turn",
     "corpus_tree_enabled",
-    "include_archived",
     "grader_enabled",
     "grader_threshold",
     "grader_keep_top",

@@ -191,21 +191,15 @@ def test_auto_mode_asks_backend_to_group_by_section(monkeypatch):
     assert calls[0][2]["section_max_chars"] == 1234
 
 
-def test_archived_pages_are_searched_by_default(monkeypatch):
-    """Бэкенд по умолчанию вырезает всё под папкой «Архив» — нам это не годится.
-
-    На живом дереве заказчика под Архивом оказался раздел с актуальными
-    страницами: за весь прогон `baseline` оттуда не пришло ни одного источника
-    из 215, и четыре «промаха ретрива» были этим фильтром. Скрывать содержимое
-    базы по имени папки продукт не заказывал, поэтому запрос идёт с
-    `include_archived`, а ключ оставлен на случай обратного решения.
-    """
+def test_archived_pages_are_never_searched(monkeypatch):
+    """The active knowledge base excludes archived pages for every user."""
     calls = _install_retrieval(monkeypatch, [_hit(1)])
     _build("вопрос про архитектуру сервиса", [_hit(1)])
-    assert calls[0][2]["include_archived"] is True
+    assert calls[0][2]["include_archived"] is False
 
     calls.clear()
-    _build("вопрос про архитектуру сервиса", [_hit(1)], include_archived=False)
+    # A stale per-user setting from an older release cannot turn it back on.
+    _build("вопрос про архитектуру сервиса", [_hit(1)], include_archived=True)
     assert calls[0][2]["include_archived"] is False
 
 

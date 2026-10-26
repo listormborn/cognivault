@@ -223,9 +223,6 @@ def server_config() -> dict[str, Any]:
             "corpus_tree_enabled": _env_bool(
                 "RAG_CORPUS_TREE_ENABLED", bool(rag["corpus_tree_enabled"])
             ),
-            "include_archived": _env_bool(
-                "RAG_INCLUDE_ARCHIVED", bool(rag["include_archived"])
-            ),
             "condense_timeout": _env_float(
                 "RAG_CONDENSE_TIMEOUT", float(rag["condense_timeout"])
             ),
@@ -339,7 +336,6 @@ USER_EDITABLE_KEYS: tuple[str, ...] = (
     "rag.condense_enabled",
     "rag.condense_first_turn",
     "rag.corpus_tree_enabled",
-    "rag.include_archived",
     "rag.grader_enabled",
     "rag.grader_threshold",
     "rag.condense_timeout",
@@ -558,7 +554,6 @@ def validate_user_overrides(
             "condense_first_turn",
             "corpus_tree_enabled",
             "grader_enabled",
-            "include_archived",
         ):
             if key in rag:
                 rag[key] = _strict_bool(f"rag.{key}", rag[key])

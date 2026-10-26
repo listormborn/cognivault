@@ -34,11 +34,11 @@ Load-bearing decisions:
   is genuinely opaque — the top-level sections and their immediate children are
   product names («Marksman», «General API», «PSI»), while everything deeper is
   already a self-describing page title («Пользовательская инструкция. BMPF»).
-* **Mark what the titles hide.** A bare list of titles reads as an inventory and
-  is authoritative when it lies. Three facts are marked in the rendered tree:
-  archived branches, pages that are only containers, and pages with no text of
-  their own — on the reference corpus 17 of 127 pages produce zero chunks, so a
-  seventh of an unmarked list would be pages retrieval can never return.
+* **Hide archived branches.** The user-facing catalogue describes the active
+  knowledge base only. Pages under folders named ``Архив``/``archive`` (or
+  explicitly named as deprecated/obsolete) stay indexed for compatibility but
+  are not advertised as available topics. Container and empty-page markers keep
+  the remaining inventory honest.
   The human-written list pages are no substitute: «База знаний» lists 2 of its 3
   children, «Fincert» 5 of 6, and «General» links outside its own subtree. The
   index is the only honest source for the tree, which is why the caption says so.
@@ -117,9 +117,8 @@ _EMPTY_MAX_BYTES_UNANNOTATED = 600
 # cap is a guard against a pathological vault, not a design limit.
 _MAX_DESCENT = 8
 
-# Segments that mark a branch as archived. Matched on the segment name, so the
-# marker lands on the branch root and the nesting carries it to the children.
-# Narrow on purpose — «old» and «backup» are ordinary words in a product tree.
+# Segments that hide an archived branch from the active catalogue. Narrow on
+# purpose — «old» and «backup» are ordinary words in a product tree.
 _ARCHIVE_RE = re.compile(r"(?:^|\W)(?:архив|archive[ds]?|deprecated|устаревш)", re.I)
 
 # Sentence end for trimming an annotation. ``\s`` is required so that
@@ -159,14 +158,13 @@ _TAIL = (
 # Legend entries, emitted only for the markers that actually occur in the render
 # — explaining a marker the reader will never see is pure cost.
 _LEGEND = {
-    "архив": "[архив] — устаревший раздел, оставлен для истории",
     "раздел": "[раздел: N] — страница-контейнер, внутри неё N документов",
     "пусто": (
         "[пусто] — у страницы нет собственного текста, только заголовок: "
         "поиск по ней ничего не вернёт"
     ),
 }
-_LEGEND_ORDER = ("архив", "раздел", "пусто")
+_LEGEND_ORDER = ("раздел", "пусто")
 
 
 # --------------------------------------------------------------------------- #
@@ -277,17 +275,14 @@ def _is_empty(node: _Node, annotated: bool = True) -> bool:
     return node.size is not None and node.size <= limit
 
 
-def _marks(node: _Node, archived: bool, annotated: bool) -> tuple[str, set[str]]:
-    """``(" [архив, раздел: 6, пусто]", {"архив", "раздел", "пусто"})``, or empty.
+def _marks(node: _Node, annotated: bool) -> tuple[str, set[str]]:
+    """``(" [раздел: 6, пусто]", {"раздел", "пусто"})``, or empty.
 
     One bracket group per line rather than three: three groups on a 40-character
     title is noise, and noise is what a reader skips.
     """
     parts: list[str] = []
     used: set[str] = set()
-    if archived:
-        parts.append("архив")
-        used.add("архив")
     inside = node.subtree_documents
     if inside:
         parts.append(f"раздел: {inside}")
@@ -320,7 +315,6 @@ def _lines(
     desc_depth: int,
     annotated: bool,
     depth: int = 1,
-    archived: bool = False,
 ) -> tuple[list[str], set[str]]:
     """Render ``nodes`` as indented lines; returns the lines and the markers used.
 
@@ -331,9 +325,7 @@ def _lines(
     out: list[str] = []
     used: set[str] = set()
     for node in sorted(nodes, key=lambda n: n.name.lower()):
-        branch_archived = archived or bool(_ARCHIVE_RE.search(node.name))
-        # The marker goes on the branch ROOT only — the indent carries it down.
-        mark, mark_used = _marks(node, branch_archived and not archived, annotated)
+        mark, mark_used = _marks(node, annotated)
         used |= mark_used
         line = f"{'  ' * (depth - 1)}- {node.name}{mark}"
         if depth <= desc_depth:
@@ -348,7 +340,6 @@ def _lines(
                 desc_depth=desc_depth,
                 annotated=annotated,
                 depth=depth + 1,
-                archived=branch_archived,
             )
             out.extend(child_lines)
             used |= child_used
@@ -468,20 +459,31 @@ def _prepare(
         return None
     if str(data.get("status") or "") == "empty_vault":
         return None
-    documents = catalog.documents_of(data)
+    # Archive pages may remain in the backend index for compatibility, but they
+    # are not part of the active user-facing knowledge base.
+    documents = active_documents(data)
     if not documents:
         return None
     roots, prefix = build(documents)
     if not roots:
         return None
-    raw_total = data.get("total")
-    total = (
-        raw_total
-        if isinstance(raw_total, int) and not isinstance(raw_total, bool) and raw_total > 0
-        else len(documents)
-    )
+    total = len(documents)
     annotated = any(d.get("summary") for d in documents)
     return roots, prefix, total, len(documents), annotated
+
+
+def active_documents(data: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Catalogue documents visible to users, excluding every archived branch."""
+    if not isinstance(data, dict):
+        return []
+    return [
+        document
+        for document in catalog.documents_of(data)
+        if not any(
+            _ARCHIVE_RE.search(segment)
+            for segment in _segments(str(document.get("path") or ""))
+        )
+    ]
 
 
 def render(

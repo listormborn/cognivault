@@ -949,9 +949,9 @@ async def _build_auto(
     # boundaries, which beats re-deriving them from the rendered document here.
     # The semantic fallback returns neither field; `add_sections` degrades to the
     # bare chunk in that case.
-    # Архив в выдаче — по умолчанию да: бэкенд иначе молча вырезает всё под
-    # папкой «Архив», а на живом дереве туда уехали актуальные страницы.
-    include_archived = bool(rcfg.get("include_archived", True))
+    # The product exposes only active knowledge. Keep the explicit flag in the
+    # backend request so older deployments apply the archive filter too.
+    include_archived = False
     try:
         try:
             raw = await cognivault.hybrid_search(
