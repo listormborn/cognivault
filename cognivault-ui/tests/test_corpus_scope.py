@@ -178,6 +178,37 @@ def test_matcher_ignores_long_input():
     assert corpus_scope.match_meta("что ты знаешь " + "и " * 200) is None
 
 
+@pytest.mark.parametrize(
+    "question",
+    [
+        "На какие вопросы ты модешь отвечать?",
+        "На какие вопросы ты можеш отвечать?",
+        "На какие вапросы ты можешь отвечать?",
+        "На какие вопросы ты можешь отвечат?",
+        "О чем я магу у тебя спросить?",
+    ],
+)
+def test_scope_questions_tolerate_one_or_two_typing_errors(question):
+    """Опечатка не должна отправлять метавопрос в поиск случайных документов."""
+    assert corpus_scope.match_meta(question) == corpus_scope.META_ASSISTANT
+    assert corpus_scope.match_meta(question, has_history=True) == (
+        corpus_scope.META_ASSISTANT
+    )
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "На какие вопросы отвечает Fincert?",
+        "Какие вопросы задаются на code review?",
+        "Что ты знаешь про PSI?",
+        "О чем можно спросить про Feature Store?",
+    ],
+)
+def test_fuzzy_scope_match_does_not_swallow_subject_questions(question):
+    assert corpus_scope.match_meta(question) is None
+
+
 # --------------------------------------------------------------------------- #
 # D6: именительный падеж — «какие продукты ты знаешь?»
 # --------------------------------------------------------------------------- #

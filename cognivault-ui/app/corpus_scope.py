@@ -408,6 +408,63 @@ _COMPILED: tuple[tuple[str, bool, re.Pattern[str]], ...] = tuple(
     for kind, first_turn_only, pattern in _PATTERNS
 )
 
+# A deliberately small fuzzy fallback for the most common questions about the
+# assistant's scope.  Regexes above stay the primary recogniser: they are exact
+# and keep subject-matter questions out of the meta branch.  The fallback is
+# limited to complete, anchored clauses and at most two character edits, so a
+# typo such as «модешь» or «отвечат» does not turn the question into retrieval,
+# while «что ты знаешь про Fincert» remains far outside the boundary.
+_FUZZY_ASSISTANT_CLAUSES: tuple[str, ...] = (
+    "на какие вопросы ты можешь отвечать",
+    "на какие вопросы ты можешь ответить",
+    "на какие вопросы вы можете отвечать",
+    "на какие вопросы вы можете ответить",
+    "о чем я могу у тебя спросить",
+    "о чем я могу тебя спросить",
+    "какие вопросы я могу тебе задать",
+    "какие вопросы я могу задать тебе",
+    "какие вопросы можно тебе задать",
+    "какие вопросы тебе можно задавать",
+)
+_FUZZY_MAX_EDITS = 2
+
+
+def _within_edits(left: str, right: str, limit: int) -> bool:
+    """Whether two short clauses are within ``limit`` Levenshtein edits.
+
+    The bounded rows and early exits matter more than a general-purpose edit
+    distance here: this function sits on every question, but its only caller
+    compares short strings with a limit of two.
+    """
+    if abs(len(left) - len(right)) > limit:
+        return False
+    if left == right:
+        return True
+    previous = list(range(len(right) + 1))
+    for row_no, left_char in enumerate(left, start=1):
+        current = [row_no]
+        row_min = row_no
+        for column, right_char in enumerate(right, start=1):
+            value = min(
+                current[column - 1] + 1,
+                previous[column] + 1,
+                previous[column - 1] + (left_char != right_char),
+            )
+            current.append(value)
+            row_min = min(row_min, value)
+        if row_min > limit:
+            return False
+        previous = current
+    return previous[-1] <= limit
+
+
+def _fuzzy_assistant_kind(clause: str) -> str | None:
+    """Recognise a near-exact scope question with one or two typing errors."""
+    for expected in _FUZZY_ASSISTANT_CLAUSES:
+        if _within_edits(clause, expected, _FUZZY_MAX_EDITS):
+            return META_ASSISTANT
+    return None
+
 
 def _normalise(text: str) -> str:
     """Lowercase, collapse whitespace, drop quotes and edge punctuation."""
@@ -436,7 +493,7 @@ def _clause_kind(clause: str, has_history: bool) -> str | None:
             continue
         if pattern.fullmatch(clause):
             return kind
-    return None
+    return _fuzzy_assistant_kind(clause)
 
 
 def match_meta(question: str, *, has_history: bool = False) -> str | None:
