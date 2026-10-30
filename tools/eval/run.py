@@ -319,6 +319,7 @@ _REFUSAL_PATTERNS = (
     r"в\s+источниках\s+(?:нет|отсутству)",
     r"не\s+нашлось\s+ответа",
     r"информаци\w+\s+(?:нет|не\s+найдено)",
+    r"не\s+наш[её]л\s+информаци\w+",
 )
 _REFUSAL_RE = re.compile("|".join(_REFUSAL_PATTERNS), re.IGNORECASE)
 

@@ -330,6 +330,10 @@ def test_alt_source_paths_absent_empty_or_malformed_change_nothing():
 
 def test_is_refusal_recognises_the_prompt_wording_and_no_context():
     assert is_refusal("В доступных мне документах ответа на этот вопрос не нашлось.")
+    assert is_refusal(
+        "К сожалению, в базе знаний я не нашёл информации, которая позволила бы "
+        "надёжно ответить на этот вопрос. Попробуйте уточнить формулировку."
+    )
     assert is_refusal("В базе знаний нет данных по этому вопросу.")
     assert is_refusal("", finish_reason="no_context")
     assert not is_refusal("Порог грейдера задаётся ключом RAG_GRADER_THRESHOLD.")
