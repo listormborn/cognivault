@@ -151,6 +151,10 @@ def _configure_logging() -> None:
 def create_app() -> FastAPI:
     _suppress_insecure_warnings()
     _configure_logging()
+    if settings.is_server():
+        # Fail the pod at startup on an unsafe RBAC configuration. A typo must
+        # never degrade into "every valid token is an administrator".
+        settings.admin_token_hashes()
 
     app = FastAPI(title="CogniVault UI", version="1.0.0")
 
@@ -165,6 +169,7 @@ def create_app() -> FastAPI:
     # mode — except public GET /api/config, /api/whoami (self-checks), /healthz,
     # and static assets.
     auth = [Depends(deps.get_token)]
+    admin_auth = [Depends(deps.require_admin)]
 
     # Routers first so /api takes precedence over the SPA catch-all mount.
     # config_routes gates PUT/status per-route so GET /api/config stays public.
@@ -172,22 +177,22 @@ def create_app() -> FastAPI:
     app.include_router(chat_routes.router, dependencies=auth)
     app.include_router(history_routes.router, dependencies=auth)
     app.include_router(feedback_routes.router, dependencies=auth)
-    app.include_router(upload_routes.router, dependencies=auth)
+    app.include_router(upload_routes.router, dependencies=admin_auth)
     # Empty-chat greeting: real top-level corpus sections, no LLM call. It is
     # authenticated because the catalogue is tenant-specific.
     app.include_router(welcome_routes.router, dependencies=auth)
     # Index maintenance (reindex / collection rebuild). Both modes: the operator
     # has no shell or vector-DB access, so the drawer is the only surface.
-    app.include_router(admin_routes.router, dependencies=auth)
+    app.include_router(admin_routes.router, dependencies=admin_auth)
     # Прогон харнесса оценки. Запускать его надо ИЗНУТРИ пода (снаружи закрытого
     # контура нет ни UI, ни mTLS-эндпоинта судьи), а прав на kubectl exec у того,
     # кто читает отчёты, может не быть вовсе — кнопка снимает это ограничение.
-    app.include_router(eval_routes.router, dependencies=auth)
+    app.include_router(eval_routes.router, dependencies=admin_auth)
     # Confluence source: per-user data, registered in BOTH modes behind the same
     # bearer-token gate. The CONFLUENCE_ENABLED admin flag (default on) lets a
     # server deployment turn the surface off entirely.
     if settings.confluence_enabled():
-        app.include_router(confluence_routes.router, dependencies=auth)
+        app.include_router(confluence_routes.router, dependencies=admin_auth)
     if not settings.is_server():
         # Env provisioning is a local-only concern; in server mode these routes
         # simply don't exist (the 404 envelope handles them).
@@ -207,7 +212,7 @@ def create_app() -> FastAPI:
         true}``, invalid → 401 UNAUTHORIZED, CogniVault down → 503 CV_UNAVAILABLE.
         """
         if not settings.is_server():
-            return {"userId": "local", "ok": True}
+            return {"userId": "local", "role": deps.ROLE_ADMIN, "ok": True}
         token = deps.get_token(request)  # 401 if header missing/malformed
         try:
             valid = await deps.validate_token(token)
@@ -223,7 +228,11 @@ def create_app() -> FastAPI:
             )
         if not valid:
             raise ApiError(401, "UNAUTHORIZED", "нет токена доступа")
-        return {"userId": deps.user_bucket(token), "ok": True}
+        return {
+            "userId": deps.user_bucket(token),
+            "role": deps.role_for_token(token),
+            "ok": True,
+        }
 
     @app.exception_handler(404)
     async def not_found_handler(request: Request, exc: Any) -> Any:

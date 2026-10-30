@@ -20,7 +20,14 @@ from ..config import (
     load_config,
     save_config,
 )
-from ..deps import ApiError, get_token, resolve_paths
+from ..deps import (
+    ROLE_ADMIN,
+    ApiError,
+    get_role,
+    get_token,
+    require_admin,
+    resolve_paths,
+)
 from ..llm_errors import GigaChatError, KitaiCatalogForbidden
 
 log = logging.getLogger("cognivault-ui.config")
@@ -234,6 +241,20 @@ async def put_config(
     the administrator, so the whole body is written to the global file — but the
     editable values go through the same validation.
     """
+    if settings.is_server() and get_role(request) != ROLE_ADMIN:
+        # Theme is a harmless personal preference exposed outside the admin-only
+        # settings drawer. Model, retrieval and prompt changes remain admin-only.
+        if not (
+            set(partial) == {"ui"}
+            and isinstance(partial.get("ui"), dict)
+            and set(partial["ui"]) == {"theme"}
+        ):
+            raise ApiError(
+                403,
+                "FORBIDDEN",
+                "Недостаточно прав: изменять настройки может только администратор",
+            )
+
     paths = resolve_paths(request)
     filtered, ignored = settings.filter_user_overrides(partial)
 
@@ -312,7 +333,7 @@ async def get_status(
 
 @router.get("/config/models")
 async def get_models(
-    request: Request, _token: str = Depends(get_token)
+    request: Request, _token: str = Depends(require_admin)
 ) -> dict[str, Any]:
     """Models the active provider offers, for the settings dropdown.
 

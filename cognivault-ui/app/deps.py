@@ -9,6 +9,7 @@ behaviour (config-file token, global ``PATHS``) so downstream code has one path.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import time
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,8 @@ from . import settings
 from .config import PATHS, AppPaths
 
 _BEARER_PREFIX = "Bearer "
+ROLE_ADMIN = "admin"
+ROLE_USER = "user"
 
 
 class ApiError(Exception):
@@ -74,6 +77,38 @@ def get_token(request: Request) -> str:
     token = auth[len(_BEARER_PREFIX):].strip()
     if not token:
         raise ApiError(401, "UNAUTHORIZED", "нет токена доступа")
+    return token
+
+
+def role_for_token(token: str) -> str:
+    """Return the caller's role under the optional token-hash RBAC policy."""
+    if not settings.is_server() or not settings.rbac_enabled():
+        return ROLE_ADMIN
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return (
+        ROLE_ADMIN
+        if any(
+            hmac.compare_digest(digest, expected)
+            for expected in settings.admin_token_hashes()
+        )
+        else ROLE_USER
+    )
+
+
+def get_role(request: Request) -> str:
+    """Role for this request; also enforces the normal bearer-token gate."""
+    return role_for_token(get_token(request))
+
+
+def require_admin(request: Request) -> str:
+    """FastAPI dependency for administrative routes."""
+    token = get_token(request)
+    if role_for_token(token) != ROLE_ADMIN:
+        raise ApiError(
+            403,
+            "FORBIDDEN",
+            "Недостаточно прав: требуется роль администратора",
+        )
     return token
 
 

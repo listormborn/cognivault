@@ -16,6 +16,7 @@ import copy
 import json
 import logging
 import os
+import string
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,38 @@ MODE: str = _resolve_mode()
 
 def is_server() -> bool:
     return MODE == "server"
+
+
+def rbac_enabled() -> bool:
+    """Whether token-based ``admin``/``user`` roles are enforced."""
+    return _env_bool("UI_RBAC_ENABLED", False)
+
+
+def admin_token_hashes() -> tuple[str, ...]:
+    """Configured SHA-256 hashes of administrator CogniVault tokens.
+
+    Hashes are safe to keep in the ConfigMap; the bearer tokens themselves stay
+    in the browser and CogniVault registry. Invalid configuration fails closed
+    when RBAC is enabled instead of silently granting everybody administrator
+    access.
+    """
+    raw = os.environ.get("UI_ADMIN_TOKEN_HASHES", "")
+    values = tuple(
+        part.strip().lower()
+        for part in raw.replace("\n", ",").split(",")
+        if part.strip()
+    )
+    valid = tuple(
+        value
+        for value in values
+        if len(value) == 64 and all(char in string.hexdigits for char in value)
+    )
+    if rbac_enabled() and (not values or len(valid) != len(values)):
+        raise RuntimeError(
+            "UI_RBAC_ENABLED=true requires UI_ADMIN_TOKEN_HASHES to contain "
+            "one or more comma-separated SHA-256 hashes"
+        )
+    return valid
 
 
 # --------------------------------------------------------------------------- #

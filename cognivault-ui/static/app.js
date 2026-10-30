@@ -9,6 +9,7 @@
   /* ============================ STATE ============================ */
   const state = {
     config: null,          // full config object from GET /api/config
+    role: null,            // "admin" | "user" after /api/whoami
     chatId: null,          // current conversation id (null = fresh)
     messages: [],          // visible turns: { role, content, sources?, rag? }
     rag: true,             // RAG toggle
@@ -637,8 +638,13 @@
 
   async function onLoggedIn(who) {
     const userId = (who && (who.userId || who.user_id)) || "";
+    state.role = (who && who.role) || "admin";
     if (dom.identityUser) dom.identityUser.textContent = userId;
     if (dom.identity) dom.identity.hidden = false;
+    const isAdmin = state.role === "admin";
+    if (dom.settingsBtn) dom.settingsBtn.hidden = !isAdmin;
+    if (dom.bannerBtn) dom.bannerBtn.hidden = !isAdmin;
+    if (!isAdmin) closeDrawer();
     // Re-read the config with the user's token: the anonymous boot request can
     // legitimately carry a narrower subset than the authenticated one.
     try { state.config = await apiGet("/api/config"); } catch (_) {}
@@ -650,7 +656,9 @@
 
   function logout() {
     clearToken();
+    state.role = null;
     if (dom.identity) dom.identity.hidden = true;
+    if (dom.settingsBtn) dom.settingsBtn.hidden = false;
     // reset the visible conversation so the next user starts clean
     if (state.abort) state.abort.abort();
     state.chatId = null;
@@ -1110,6 +1118,7 @@
   /* ---- drawer open/close + focus trap ---- */
   let lastFocused = null;
   function openDrawer() {
+    if (isServerMode() && state.role !== "admin") return;
     lastFocused = document.activeElement;
     dom.scrim.hidden = false;
     dom.drawer.hidden = false;

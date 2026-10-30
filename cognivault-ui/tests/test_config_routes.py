@@ -16,6 +16,7 @@ pytest + Starlette ``TestClient`` (no real network, no real ``/data``).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -25,7 +26,7 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app import config, rag, settings  # noqa: E402
+from app import config, deps, rag, settings  # noqa: E402
 from app.deps import user_bucket  # noqa: E402
 from app.main import create_app  # noqa: E402
 from app.routes import config_routes  # noqa: E402
@@ -62,6 +63,14 @@ def _stored(tmp_path, token: str) -> dict:
 
 def _auth(token: str = TOKEN_A) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def _enable_rbac(monkeypatch, admin_token: str = TOKEN_A) -> None:
+    monkeypatch.setenv("UI_RBAC_ENABLED", "true")
+    monkeypatch.setenv(
+        "UI_ADMIN_TOKEN_HASHES",
+        hashlib.sha256(admin_token.encode("utf-8")).hexdigest(),
+    )
 
 
 def _put(client: TestClient, body: dict, token: str = TOKEN_A):
@@ -337,6 +346,47 @@ def test_get_is_public_and_put_requires_token_in_server_mode(tmp_path, monkeypat
     assert anon_put.status_code == 401
     assert anon_put.json()["error"]["code"] == "UNAUTHORIZED"
     assert not (tmp_path / "data" / "users").exists()
+
+
+def test_rbac_assigns_roles_and_protects_admin_surfaces(tmp_path, monkeypatch):
+    """Admin hash grants settings; another valid token stays chat-only."""
+    _server_mode(monkeypatch, tmp_path)
+    _enable_rbac(monkeypatch)
+
+    async def valid_token(_token: str) -> bool:
+        return True
+
+    monkeypatch.setattr(deps, "validate_token", valid_token)
+
+    with TestClient(create_app()) as client:
+        admin_who = client.get("/api/whoami", headers=_auth(TOKEN_A))
+        user_who = client.get("/api/whoami", headers=_auth(TOKEN_B))
+        admin_put = _put(client, {"gigachat": {"temperature": 0.4}}, TOKEN_A)
+        user_put = _put(client, {"gigachat": {"temperature": 0.8}}, TOKEN_B)
+        user_theme = _put(client, {"ui": {"theme": "dark"}}, TOKEN_B)
+        user_admin = client.get("/api/admin/collection", headers=_auth(TOKEN_B))
+        user_confluence = client.get("/api/confluence/config", headers=_auth(TOKEN_B))
+
+    assert admin_who.status_code == 200
+    assert admin_who.json()["role"] == "admin"
+    assert user_who.status_code == 200
+    assert user_who.json()["role"] == "user"
+    assert admin_put.status_code == 200
+    assert user_put.status_code == 403
+    assert user_put.json()["error"]["code"] == "FORBIDDEN"
+    assert user_theme.status_code == 200
+    assert user_admin.status_code == 403
+    assert user_confluence.status_code == 403
+
+
+def test_enabled_rbac_rejects_missing_admin_hashes(tmp_path, monkeypatch):
+    """A bad rollout fails closed instead of granting every token admin."""
+    _server_mode(monkeypatch, tmp_path)
+    monkeypatch.setenv("UI_RBAC_ENABLED", "true")
+    monkeypatch.delenv("UI_ADMIN_TOKEN_HASHES", raising=False)
+
+    with pytest.raises(RuntimeError, match="UI_ADMIN_TOKEN_HASHES"):
+        create_app()
 
 
 # --------------------------------------------------------------------------- #

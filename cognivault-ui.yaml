@@ -26,6 +26,11 @@ data:
   # второй проход грейдера, пропущенные фрагменты и query_id KitAI — без этого
   # деградация конвейера в логе пода не видна. DEBUG на время разбора инцидента.
   UI_LOG_LEVEL: "INFO"
+  # Роли по существующим CogniVault-токенам. Сначала внесите SHA-256 хеш
+  # админского токена (не сам токен), затем включите RBAC. Пока false, все
+  # валидные токены сохраняют историческую роль admin.
+  UI_RBAC_ENABLED: "false"
+  UI_ADMIN_TOKEN_HASHES: ""
   GIGACHAT_BASE_URL: "https://gigachat-ift.sberdevices.delta.sbrf.ru/v1"
   GIGACHAT_MODEL: "GigaChat-3-Ultra-preview"
   GIGACHAT_CERT_PATH: "/certs/client_crt.crt"

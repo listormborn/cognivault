@@ -24,6 +24,19 @@ manifests and the full deployment procedure live in
 [`deploy/dropapp/README.md`](../deploy/dropapp/README.md). The rest of this file
 describes the local mode.
 
+### Token roles in server mode
+
+Token-based RBAC is opt-in and keeps existing deployments backward-compatible.
+With `UI_RBAC_ENABLED=false` every valid token has the historical `admin` role.
+To enable it, set `UI_ADMIN_TOKEN_HASHES` to one or more comma-separated
+SHA-256 hashes of administrator CogniVault tokens, then set
+`UI_RBAC_ENABLED=true`. Never put the tokens themselves in this variable.
+
+Administrators can open settings, configure Confluence, upload/evaluate data and
+maintain the index. Regular users can chat, keep history, follow source links and
+leave feedback. The UI hides the settings entry, and the protected APIs enforce
+the same boundary with HTTP 403.
+
 ## First run (bootstrap, local mode)
 
 The bootstrap script uses only the Python standard library, so it runs before
