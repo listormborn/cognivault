@@ -95,6 +95,7 @@ def _local_mode(monkeypatch):
         ("Какая информация у тебя есть?", "assistant"),
         ("Какие документы у тебя есть?", "assistant"),
         ("На какие вопросы ты можешь ответить?", "assistant"),
+        ("На какие вопросы ты можешь отвечать?", "assistant"),
         ("О чём я могу у тебя спросить?", "assistant"),
         ("О чем я могу тебя спросить?", "assistant"),
         ("Что я могу у тебя спросить?", "assistant"),
@@ -115,6 +116,9 @@ def _local_mode(monkeypatch):
         ("Перечислите разделы базы знаний", "corpus"),
         ("Покажи структуру базы", "corpus"),
         ("Назови разделы базы знаний", "corpus"),
+        ("Какие инструменты есть в базе?", "corpus"),
+        ("Какие инструменты ты знаешь?", "corpus"),
+        ("О каких инструментах есть информация в базе знаний?", "corpus"),
         # --- D4: вопросы о поведении самого ассистента ---------------------- #
         ("Всегда ли ответ в Markdown с заголовками?", "assistant"),
         ("В каком формате ты отвечаешь?", "assistant"),
@@ -938,6 +942,12 @@ def test_the_two_meta_families_get_different_material(monkeypatch):
     assert about_self.system_message["content"] == rag.META_SELF_SYSTEM_PROMPT
     assert "Как ты работаешь" not in about_base.user_message["content"]
     assert "Как ты работаешь" in about_self.user_message["content"]
+
+
+def test_meta_prompts_request_compact_deduplicated_scope_answers():
+    assert "Не повторяй одну сущность" in rag.META_SYSTEM_PROMPT
+    assert "компактный список уникальных" in rag.META_SYSTEM_PROMPT
+    assert "Не пересказывай\n  всё дерево" in rag.META_SELF_SYSTEM_PROMPT
 
 
 def test_question_about_the_assistant_survives_an_unavailable_listing(monkeypatch):
