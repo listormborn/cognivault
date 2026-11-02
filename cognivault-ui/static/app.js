@@ -2266,7 +2266,7 @@
     chips.hidden = true; // collapsed by default (per-render UI state, not persisted)
     sources.forEach((s) => {
       const chip = el("div", "chip");
-      const titleText = s.title || s.name || "Документ";
+      const titleText = s.title || s.name || s.path || "Документ";
       // Full path is kept only as a tooltip for power users — never shown inline.
       if (s.path) chip.title = s.path;
       // Clickable Confluence source: title becomes a link when a safe http(s)
@@ -2281,6 +2281,9 @@
         chip.appendChild(a);
       } else {
         chip.appendChild(el("span", "ct", titleText));
+        const missing = el("span", "cno", "ссылка не найдена");
+        missing.title = "Для этого документа не найден URL страницы Confluence";
+        chip.appendChild(missing);
       }
       const depthLabel = DEPTH_LABEL[s.depth];
       if (depthLabel) chip.appendChild(el("span", "cd", depthLabel));
@@ -2503,8 +2506,9 @@
   }
 
   /* ---- inline citation linkifier ----
-   * Turns `[Источник N]`, `[Источник 1, 2]`, `[Источники 1, 2, 3]` inside a
-   * rendered answer into hyperlinks. Only numbers whose source carries a safe
+   * Turns strict `[Источник N]` and common model variants (`Источник N`,
+   * `[Источник: N]`, plural lists) inside a rendered answer into hyperlinks.
+   * Only numbers whose source carries a safe
    * http(s) `url` become links; numbers of link-less sources stay plain text.
    * Numbers the model invented (not in the source list at all) also stay plain
    * text but get a `cite-bad` class and are reported once per message. Runs over
@@ -2528,7 +2532,7 @@
     // so it must be flagged too. The TreeWalker below only visits text nodes
     // that actually contain a citation, so this costs nothing otherwise.
 
-    const hasCite = (t) => /\[\s*Источник(?:и|а)?\s+\d/.test(t);
+    const hasCite = (t) => /(?:\[\s*)?Источник(?:и|а)?\s*:?\s+\d/i.test(t);
     const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
         for (let p = node.parentNode; p && p !== container; p = p.parentNode) {
@@ -2554,8 +2558,9 @@
 
   function replaceCitationsInText(node, urlByN, validN, unknownN) {
     const text = node.nodeValue;
-    // g1 = "[Источник " (bracket + word + spaces); g2 = numbers+separators; g3 = "]"
-    const re = /(\[\s*Источник(?:и|а)?\s+)(\d+(?:\s*[,;]\s*\d+)*)(\s*\])/g;
+    // g1 = label (optional opening bracket/colon), g2 = numbers+separators,
+    // g3 = optional closing bracket. The visible text is preserved verbatim.
+    const re = /((?:\[\s*)?Источник(?:и|а)?\s*:?\s+)(\d+(?:\s*[,;]\s*\d+)*)(\s*\]?)/gi;
     let m, last = 0, frag = null;
     while ((m = re.exec(text))) {
       if (!frag) frag = document.createDocumentFragment();

@@ -134,6 +134,7 @@ button,input,textarea,select{font:inherit;color:inherit}
 .chip .ct{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .chip .cs{font-family:var(--font-mono);font-size:11px;font-variant-numeric:tabular-nums;color:var(--accent);padding:1px 6px;border-radius:var(--r-pill);background:var(--accent-weak)}
 .chip .cd{font-family:var(--font-display);font-size:10px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--fg-muted);padding:1px 6px;border-radius:var(--r-pill);background:var(--surface);border:1px solid var(--border)}
+.chip .cno{font-size:10px;color:var(--warn);white-space:nowrap}
 /* inline citation links inside the answer body */
 .bubble a.cite-link{color:var(--accent);text-decoration:none;white-space:nowrap}
 .bubble a.cite-link:hover{text-decoration:underline}

@@ -603,6 +603,9 @@ def test_retrieval_failure_yields_notice(monkeypatch):
         ("плохо [Источник 9]", 3, [9]),
         ("[Источники 1, 7] и [Источника 2; 8]", 3, [7, 8]),
         ("[Источник 0]", 3, [0]),
+        ("вариант без скобок Источник 9", 3, [9]),
+        ("вариант с двоеточием [Источник: 2]", 3, []),
+        ("строчные буквы [источник: 7]", 3, [7]),
         ("без цитат вообще", 3, []),
         ("", 3, []),
         ("[Источник 1]", 0, [1]),
@@ -610,6 +613,19 @@ def test_retrieval_failure_yields_notice(monkeypatch):
 )
 def test_invalid_citations(text, n, expected):
     assert chat_routes._invalid_citations(text, n) == expected
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("[Источник 1]", []),
+        ("[Источник: 1]", []),
+        ("[источник: 1]", []),
+        ("[Источник базы знаний]", ["[Источник базы знаний]"]),
+    ],
+)
+def test_malformed_citations_accepts_supported_variants(text, expected):
+    assert chat_routes._malformed_citations(text) == expected
 
 
 # --------------------------------------------------------------------------- #
