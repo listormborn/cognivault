@@ -229,6 +229,25 @@ def test_admin_can_review_feedback(tmp_path, monkeypatch):
     assert reviewed.json()["feedback"]["corrected_answer"] == "Проверенный ответ"
 
 
+def test_admin_queue_contains_only_negative_reactions(tmp_path, monkeypatch):
+    paths = _paths(tmp_path)
+    monkeypatch.setattr(feedback_routes, "resolve_paths", lambda request: paths)
+
+    with TestClient(create_app()) as client:
+        client.post(
+            "/api/feedback",
+            json={"chat_id": "good", "message_index": 1, "vote": "up"},
+        )
+        client.post(
+            "/api/feedback",
+            json={"chat_id": "bad", "message_index": 1, "vote": "down"},
+        )
+        queue = client.get("/api/admin/feedback?status=new")
+
+    items = queue.json()["items"]
+    assert [(item["chat_id"], item["vote"]) for item in items] == [("bad", "down")]
+
+
 def test_approved_answer_is_tenant_scoped_until_admin_makes_it_global(tmp_path):
     path = feedback_store.database_path()
     item = feedback_store.upsert(

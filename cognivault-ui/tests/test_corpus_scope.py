@@ -929,7 +929,9 @@ def test_meta_branch_falls_through_when_the_listing_is_unavailable(monkeypatch):
 
     assert ctx.intent == "kb_question"
     assert "search" in seen and "grade" in seen
-    assert ctx.sources and ctx.system_message["content"] == rag.SYSTEM_PROMPT
+    assert ctx.sources and ctx.system_message["content"] == (
+        f"{rag.SYSTEM_PROMPT}\n\n{rag.GROUNDING_GUARD}"
+    )
 
 
 # --------------------------------------------------------------------------- #

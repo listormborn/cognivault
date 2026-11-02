@@ -44,7 +44,9 @@ user can switch 👍 to 👎 (or back) and add a reason/comment.  The current st
 is stored in SQLite at `UI_FEEDBACK_DB_PATH` (default in server mode:
 `$UI_DATA_DIR/feedback.sqlite3`); `rag_log.jsonl` remains an append-only audit.
 
-Administrators review all reactions in **Settings → Feedback**.  Approving an
+Administrators review negative reactions in **Settings → Feedback**; positive
+votes stay available as aggregate telemetry but do not clutter the review
+queue.  Approving an
 item may keep the original answer or attach a corrected answer; rejecting it
 keeps it out of the trusted set.  A corrected/approved answer is reused only
 for the exact same question after case, whitespace and punctuation

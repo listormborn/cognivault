@@ -352,7 +352,7 @@ def test_system_message_holds_rules_only(monkeypatch):
     assert isinstance(ctx, rag.RagContext)
     system = ctx.system_message["content"]
     # Без переопределения в конфиге system — ровно встроенный промпт…
-    assert system == rag.SYSTEM_PROMPT
+    assert system == f"{rag.SYSTEM_PROMPT}\n\n{rag.GROUNDING_GUARD}"
     # …и правила в нём на месте (проверяем сам дефолт, а не «любой» промпт).
     assert "[Источник N]" in rag.SYSTEM_PROMPT
     assert "Не выдумывай источники" in rag.SYSTEM_PROMPT
@@ -450,7 +450,8 @@ def test_custom_system_prompt_reaches_system_message(monkeypatch):
         prompts={"system": _CUSTOM_SYSTEM},
     )
 
-    assert ctx.system_message["content"] == _CUSTOM_SYSTEM
+    assert ctx.system_message["content"].startswith(_CUSTOM_SYSTEM)
+    assert rag.GROUNDING_GUARD in ctx.system_message["content"]
     # Дефолт полностью вытеснен, а не дописан рядом.
     assert rag.SYSTEM_PROMPT not in ctx.system_message["content"]
     # Кастомный промпт без «[Источник N]» — это нормально и не ломает сборку.
@@ -476,7 +477,9 @@ def test_system_prompt_falls_back_to_default(monkeypatch, prompts):
     _install_retrieval(monkeypatch, hits)
     ctx = _build("что известно про кластер и его настройку", hits, prompts=prompts)
 
-    assert ctx.system_message["content"] == rag.SYSTEM_PROMPT
+    assert ctx.system_message["content"] == (
+        f"{rag.SYSTEM_PROMPT}\n\n{rag.GROUNDING_GUARD}"
+    )
 
 
 def test_custom_reminder_sits_between_sources_and_question(monkeypatch):
@@ -497,7 +500,9 @@ def test_custom_reminder_sits_between_sources_and_question(monkeypatch):
     # Дефолтное напоминание вытеснено.
     assert rag.CONTEXT_REMINDER not in content
     # Системный промпт при этом остался дефолтным.
-    assert ctx.system_message["content"] == rag.SYSTEM_PROMPT
+    assert ctx.system_message["content"] == (
+        f"{rag.SYSTEM_PROMPT}\n\n{rag.GROUNDING_GUARD}"
+    )
 
 
 @pytest.mark.parametrize(
@@ -525,7 +530,8 @@ def test_both_prompts_customised_in_legacy_mode(monkeypatch):
         prompts={"system": _CUSTOM_SYSTEM, "context_reminder": _CUSTOM_REMINDER},
     )
 
-    assert ctx.system_message["content"] == _CUSTOM_SYSTEM
+    assert ctx.system_message["content"].startswith(_CUSTOM_SYSTEM)
+    assert rag.GROUNDING_GUARD in ctx.system_message["content"]
     assert _CUSTOM_REMINDER in ctx.user_message["content"]
     assert rag.CONTEXT_REMINDER not in ctx.user_message["content"]
 
@@ -578,6 +584,13 @@ def test_no_results_yields_empty_context(monkeypatch):
     assert (ctx.system_message, ctx.user_message, ctx.sources, ctx.notice) == (
         None, None, [], None
     )
+
+
+def test_prompt_forbids_invented_configuration_examples():
+    assert "Не создавай примеры конфигурации" in rag.GROUNDING_GUARD
+    assert "точного примера нет" in rag.GROUNDING_GUARD
+    assert "входные данные" in rag.GROUNDING_GUARD
+    assert "не придумывай конфигурацию" in rag.CONTEXT_GROUNDING_GUARD
 
 
 def test_retrieval_failure_yields_notice(monkeypatch):
@@ -666,7 +679,9 @@ def test_chat_sends_system_history_and_context_message(monkeypatch, tmp_path):
 
     assert [m["role"] for m in sent] == ["system", "user", "assistant", "user"]
     # system — только правила (по умолчанию — встроенный промпт).
-    assert sent[0]["content"] == rag.SYSTEM_PROMPT
+    assert sent[0]["content"] == (
+        f"{rag.SYSTEM_PROMPT}\n\n{rag.GROUNDING_GUARD}"
+    )
     assert "### Источник" not in sent[0]["content"]
     # История сохранена как есть.
     assert sent[1]["content"] == "первый вопрос пользователя"
@@ -714,7 +729,8 @@ def test_chat_uses_configured_prompts(monkeypatch, tmp_path):
     assert resp.status_code == 200
     sent = captured[0]
     assert sent[0]["role"] == "system"
-    assert sent[0]["content"] == _CUSTOM_SYSTEM
+    assert sent[0]["content"].startswith(_CUSTOM_SYSTEM)
+    assert rag.GROUNDING_GUARD in sent[0]["content"]
     assert rag.SYSTEM_PROMPT not in sent[0]["content"]
     last = sent[-1]["content"]
     assert last.startswith("Источники:")
@@ -739,7 +755,9 @@ def test_chat_falls_back_to_default_prompts(monkeypatch, tmp_path):
 
     assert resp.status_code == 200
     sent = captured[0]
-    assert sent[0]["content"] == rag.SYSTEM_PROMPT
+    assert sent[0]["content"] == (
+        f"{rag.SYSTEM_PROMPT}\n\n{rag.GROUNDING_GUARD}"
+    )
     assert rag.CONTEXT_REMINDER in sent[-1]["content"]
 
 

@@ -185,7 +185,7 @@ async def list_feedback(
         return _error(400, "BAD_REQUEST", "неизвестный статус")
     return {
         "items": feedback_store.list_items(
-            _db_path(request), status=status, limit=limit
+            _db_path(request), status=status, vote="down", limit=limit
         )
     }
 

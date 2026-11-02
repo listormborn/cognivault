@@ -312,6 +312,7 @@ def test_condense_rewrites_question(monkeypatch):
     assert "Определи тип реплики" in calls[0]
     assert (
         'Ответ строго в JSON: {"intent": "...", "standalone_question": "..." | null,'
+        ' "uses_history": true | false,'
         ' "scope": "document" | "corpus",'
         ' "answer_shape": "fact" | "list" | "procedure"}'
     ) in calls[0]
@@ -1049,6 +1050,41 @@ def test_standalone_question_goes_to_search_and_final_message(monkeypatch):
     assert seen[0][1] == 40, "ширина ретрива — rerank_candidates"
     assert seen[0][2]["group_by_section"] is True
     assert ctx.user_message["content"].endswith("Вопрос: как настроить SberOSC")
+
+
+def test_complete_new_question_is_not_contaminated_by_history(monkeypatch):
+    """A model-proposed rewrite cannot import the previous product into a new topic."""
+
+    def handler(prompt):
+        return {
+            "intent": "kb_question",
+            "standalone_question": "как получить доступ к Fincert через SberOSC",
+            "uses_history": True,
+            "scope": "document",
+            "answer_shape": "procedure",
+        }
+
+    _install_complete_json(monkeypatch, handler)
+    question = "Как получить доступ к Fincert Bitbucket?"
+    result = asyncio.run(rag_pipeline.condense(question, _history(), {}, {}))
+
+    assert result.question == question
+
+
+def test_explicit_history_flag_false_keeps_even_a_pronominal_question(monkeypatch):
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {
+            "intent": "kb_question",
+            "standalone_question": "как настроить прошлый сервис",
+            "uses_history": False,
+        },
+    )
+    question = "Как его настроить?"
+
+    result = asyncio.run(rag_pipeline.condense(question, _history(), {}, {}))
+
+    assert result.question == question
 
 
 def test_refusal_when_everything_below_threshold(monkeypatch):

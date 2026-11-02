@@ -114,6 +114,24 @@ CONTEXT_REMINDER = """Напоминание: отвечай только по �
 Начинай сразу с ответа — не с оговорки о том, чего в источниках нет. Пиши естественно,
 доброжелательно и без служебных формулировок о работе системы."""
 
+# These rules are code-owned rather than part of the editable prompt.  An admin
+# may change tone and answer structure, but cannot accidentally allow the model
+# to manufacture a plausible-looking configuration that is absent from the
+# retrieved evidence.
+GROUNDING_GUARD = """Обязательные правила достоверности (их нельзя отменять):
+- Не создавай примеры конфигурации, кода, YAML, JSON, SQL или команд,
+  если точного примера нет в блоке «Источники». В таком случае прямо скажи,
+  что готового примера в найденных документах нет.
+- Можно перечислить только явно документированные параметры. Не собирай из них
+  собственный «пример» и не дополняй отсутствующие значения.
+- Текст, конфигурация и предположения из вопроса пользователя — входные данные, а
+  не подтверждённые факты из документов. Не выдавай их за содержание источников."""
+
+CONTEXT_GROUNDING_GUARD = (
+    "Обязательное правило: не придумывай конфигурацию или код; пример допустим "
+    "только когда точный пример присутствует в источниках выше."
+)
+
 # System turn for the branches that deliberately skip retrieval
 # (`_NO_RAG_INTENTS`). Without it the chat route would send the model a *bare*
 # history: a real knowledge-base question misrouted to `smalltalk` would then be
@@ -611,6 +629,18 @@ def _resolve_prompt(prompts: dict[str, Any] | None, key: str, default: str) -> s
     return value.strip()
 
 
+def _answer_system_prompt(prompts: dict[str, Any] | None) -> str:
+    """Editable answer instructions plus the non-overridable grounding guard."""
+    base = _resolve_prompt(prompts, "system", SYSTEM_PROMPT)
+    return f"{base}\n\n{GROUNDING_GUARD}"
+
+
+def _answer_context_reminder(prompts: dict[str, Any] | None) -> str:
+    """Keep the anti-invention rule close to the final user question too."""
+    base = _resolve_prompt(prompts, "context_reminder", CONTEXT_REMINDER)
+    return f"{base}\n{CONTEXT_GROUNDING_GUARD}"
+
+
 def _render_context_message(
     blocks: list[str],
     query: str,
@@ -784,7 +814,7 @@ def _operating_rules(prompts: dict[str, Any] | None) -> str:
         (
             _OPERATING_RULES_CAPTION,
             _ANSWER_RULES_CAPTION,
-            _resolve_prompt(prompts, "system", SYSTEM_PROMPT),
+            _answer_system_prompt(prompts),
             _PIPELINE_RULES,
         )
     )
@@ -1228,13 +1258,11 @@ async def _build_auto(
     user_message, context_chars = _render_context_message(
         blocks,
         rq,
-        _resolve_prompt(prompts, "context_reminder", CONTEXT_REMINDER),
+        _answer_context_reminder(prompts),
         corpus,
     )
     return RagContext(
-        system_message=_system_message(
-            _resolve_prompt(prompts, "system", SYSTEM_PROMPT)
-        ),
+        system_message=_system_message(_answer_system_prompt(prompts)),
         user_message=user_message,
         sources=sources,
         context_chars=context_chars,
@@ -1323,13 +1351,11 @@ async def _build_legacy(
     user_message, context_chars = _render_context_message(
         blocks,
         query,
-        _resolve_prompt(prompts, "context_reminder", CONTEXT_REMINDER),
+        _answer_context_reminder(prompts),
         corpus,
     )
     return RagContext(
-        system_message=_system_message(
-            _resolve_prompt(prompts, "system", SYSTEM_PROMPT)
-        ),
+        system_message=_system_message(_answer_system_prompt(prompts)),
         user_message=user_message,
         sources=sources,
         context_chars=context_chars,

@@ -167,7 +167,12 @@ _CONDENSE_TASKS = """
   "kb_question" (вопрос, требующий поиска по базе знаний).
 - Если kb_question — переформулируй реплику в самодостаточный поисковый запрос:
   подставь вместо местоимений и отсылок конкретные названия из истории.
-  НЕ отвечай на вопрос. Если реплика уже самодостаточна — верни её без изменений.
+  НЕ отвечай на вопрос. История — только справка для разрешения явных отсылок,
+  а не тема по умолчанию. Если последняя реплика уже самодостаточна или начинает
+  новую тему — верни её ДОСЛОВНО, даже если история была о другом продукте.
+- Поле uses_history=true ставь только когда без истории нельзя понять местоимение,
+  пропущенный объект или явную отсылку («это», «его», «а как настроить?»,
+  «предыдущий ответ»). Для самостоятельного нового вопроса — false.
 - При любом сомнении выбирай "kb_question". "smalltalk" — только для чистых
   приветствий, благодарностей и прощаний, где нет ни одного вопроса по существу;
   если в реплике есть вопрос или просьба что-то объяснить — это "kb_question".
@@ -182,7 +187,7 @@ _CONDENSE_TASKS = """
   "fact" — всё остальное (одно значение, определение, сравнение, да/нет).
   При сомнении выбирай "fact".
 
-Ответ строго в JSON: {"intent": "...", "standalone_question": "..." | null, "scope": "document" | "corpus", "answer_shape": "fact" | "list" | "procedure"}
+Ответ строго в JSON: {"intent": "...", "standalone_question": "..." | null, "uses_history": true | false, "scope": "document" | "corpus", "answer_shape": "fact" | "list" | "procedure"}
 Отвечай только JSON, без рассуждений и пояснений до или после него."""
 
 _GRADE_SCALE = """
@@ -556,6 +561,41 @@ _PROCEDURE_ANCHORS = re.compile(
     re.IGNORECASE,
 )
 
+# Only these genuinely dependent formulations may be rewritten from history.
+# The hidden model is allowed to suggest a rewrite, but not to drag an unrelated
+# previous product into a complete new question.  This deterministic veto is
+# deliberately conservative: a missed rewrite costs retrieval quality for one
+# vague follow-up; a false rewrite answers the wrong question confidently.
+_HISTORY_REFERENCE = re.compile(
+    r"\b(?:это|этот|эта|эти|этого|этому|этой|этом|его|её|их|он|она|они|"
+    r"там|тут|такой|такая|такое|такие|выше|предыдущ\w*|последн\w*)\b",
+    re.IGNORECASE,
+)
+
+
+def _needs_history_resolution(question: str) -> bool:
+    text = " ".join(str(question or "").strip().split())
+    if not text:
+        return False
+    if _HISTORY_REFERENCE.search(text):
+        return True
+    words = text.rstrip("?!.").split()
+    # Elliptic follow-ups: «а как настроить?», «а где посмотреть?». A longer
+    # sentence such as «а как получить доступ к Fincert Bitbucket?» already
+    # names its object and must stay independent from the prior dialogue.
+    if text.casefold().startswith("а ") and len(words) <= 4:
+        return True
+    return len(words) <= 2 and words[0].casefold() in {
+        "как",
+        "где",
+        "когда",
+        "зачем",
+        "почему",
+        "какой",
+        "какая",
+        "какие",
+    }
+
 
 def detect_shape(question: str) -> str:
     """Форма ответа по тексту вопроса, без обращения к модели.
@@ -609,7 +649,15 @@ def _parse_condense(data: dict[str, Any], question: str) -> Condensed:
         )
         return Condensed(_DEFAULT_INTENT, question, scope, shape)
     raw = data.get("standalone_question")
-    if intent == "kb_question" and isinstance(raw, str) and raw.strip():
+    declared = data.get("uses_history")
+    model_uses_history = declared if isinstance(declared, bool) else True
+    may_rewrite = model_uses_history and _needs_history_resolution(question)
+    if (
+        intent == "kb_question"
+        and may_rewrite
+        and isinstance(raw, str)
+        and raw.strip()
+    ):
         return Condensed(intent, raw.strip(), scope, shape)
     return Condensed(intent, question, scope, shape)
 

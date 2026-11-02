@@ -169,14 +169,24 @@ def get_for_answer(
 
 
 def list_items(
-    path: Path, *, status: str | None = None, limit: int = 100
+    path: Path,
+    *,
+    status: str | None = None,
+    vote: str | None = None,
+    limit: int = 100,
 ) -> list[dict[str, Any]]:
     limit = max(1, min(int(limit), 500))
     sql = "SELECT * FROM feedback"
     args: list[Any] = []
+    clauses: list[str] = []
     if status:
-        sql += " WHERE status = ?"
+        clauses.append("status = ?")
         args.append(status)
+    if vote:
+        clauses.append("vote = ?")
+        args.append(vote)
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
     sql += " ORDER BY updated_at DESC LIMIT ?"
     args.append(limit)
     with _connect(path) as conn:
