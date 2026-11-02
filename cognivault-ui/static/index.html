@@ -83,8 +83,8 @@
   <div class="drawer-body">
 
     <p class="warn-hint drawer-warn" id="persist-warn">
-      Настройки живут в рабочем каталоге сервиса (<code>/data</code>, том <code>emptyDir</code>):
-      они переживут перезагрузку страницы, но не перезапуск пода — после него вернутся стандартные значения.
+      Настройки, история и обратная связь живут в <code>/data</code>. Пока это том
+      <code>emptyDir</code>, они переживут перезагрузку страницы, но не пересоздание pod.
     </p>
 
     <!-- §0 Сведения о сервисе (только для server-режима, read-only) -->
@@ -516,6 +516,27 @@
           <div class="console" id="rebuild-console" aria-live="polite" aria-label="Журнал пересоздания коллекции" hidden></div>
         </div>
       </div>
+    </section>
+
+    <!-- §3.9 Проверка пользовательских оценок (только admin: весь drawer скрыт user) -->
+    <section class="section" id="section-feedback" aria-labelledby="s-feedback">
+      <span class="eyebrow" id="s-feedback">Обратная связь</span>
+      <small class="hint">
+        Реакция пользователя сама по себе не становится правильным ответом. Проверьте
+        вопрос, ответ и источники; при необходимости впишите исправленный ответ и только
+        после этого нажмите «Подтвердить».
+      </small>
+      <div class="inline feedback-toolbar">
+        <select class="input" id="feedback-status" aria-label="Статус отзывов">
+          <option value="new">Ожидают проверки</option>
+          <option value="approved">Подтверждённые</option>
+          <option value="rejected">Отклонённые</option>
+          <option value="all">Все</option>
+        </select>
+        <button type="button" class="btn ghost" id="feedback-refresh">Обновить</button>
+      </div>
+      <div class="conf-status" id="feedback-summary">Отзывы загружаются…</div>
+      <div class="feedback-list" id="feedback-list" aria-live="polite"></div>
     </section>
 
     <!-- §4 Окружение -->

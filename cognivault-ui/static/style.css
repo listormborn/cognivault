@@ -234,6 +234,24 @@ button,input,textarea,select{font:inherit;color:inherit}
 .chip a.ct:hover{text-decoration:underline}
 .chip a.ct .cext{font-size:11px;opacity:.75}
 
+/* Editable user reactions + administrator review queue. */
+.fb .fb-selected{border-color:var(--accent);color:var(--accent);background:var(--accent-weak)}
+.fb-details{margin-top:8px;padding:10px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-sm);display:grid;gap:8px}
+.fb-details[hidden]{display:none}
+.fb-comment{min-height:78px}
+.feedback-toolbar{margin-top:14px}
+.feedback-toolbar .input{flex:1}
+.feedback-list{display:grid;gap:12px;margin-top:12px}
+.feedback-card{padding:12px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-card)}
+.feedback-card-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;font-size:12.5px}
+.feedback-status{font-size:11px;color:var(--fg-muted)}
+.feedback-label{margin-top:9px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--fg-muted)}
+.feedback-text{margin-top:4px;font-size:12.5px;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere}
+.feedback-answer{max-height:180px;overflow-y:auto}
+.feedback-sources{font-family:var(--font-mono);font-size:11.5px}
+.feedback-correction{min-height:120px;margin-top:12px}
+.feedback-global{margin:10px 0 0}
+
 .toasts{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:10px;z-index:30}
 .toast{display:flex;gap:10px;align-items:flex-start;min-width:280px;max-width:380px;padding:12px 14px;background:var(--surface);border:1px solid var(--border);border-left-width:3px;border-radius:var(--r-input);box-shadow:var(--shadow)}
 .toast.ok{border-left-color:var(--ok)} .toast.err{border-left-color:var(--err)} .toast.warn{border-left-color:var(--warn)}

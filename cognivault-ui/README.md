@@ -37,6 +37,25 @@ maintain the index. Regular users can chat, keep history, follow source links an
 leave feedback. The UI hides the settings entry, and the protected APIs enforce
 the same boundary with HTTP 403.
 
+### Reviewable feedback
+
+`POST /api/feedback` upserts one reaction per user/chat/assistant-message, so a
+user can switch 👍 to 👎 (or back) and add a reason/comment.  The current state
+is stored in SQLite at `UI_FEEDBACK_DB_PATH` (default in server mode:
+`$UI_DATA_DIR/feedback.sqlite3`); `rag_log.jsonl` remains an append-only audit.
+
+Administrators review all reactions in **Settings → Feedback**.  Approving an
+item may keep the original answer or attach a corrected answer; rejecting it
+keeps it out of the trusted set.  A corrected/approved answer is reused only
+for the exact same question after case, whitespace and punctuation
+normalisation and, by default, only for the user who submitted it.  The admin
+may explicitly mark a reviewed answer as applicable to all users.  Raw votes
+are never treated as model training data.
+
+The DropApp manifest still mounts `/data` as `emptyDir`.  To retain the SQLite
+database across pod replacement, mount a PVC at `/data` (or mount one file
+directory elsewhere and point `UI_FEEDBACK_DB_PATH` at it).
+
 ## First run (bootstrap, local mode)
 
 The bootstrap script uses only the Python standard library, so it runs before
@@ -353,7 +372,10 @@ UI прячет пересоздание и объясняет почему — 
 | PUT    | `/api/config`               | deep-merge + persist a partial config          |
 | GET    | `/api/status`               | health/cert/env/history status                 |
 | POST   | `/api/chat`                 | streaming chat (SSE), optional RAG             |
-| POST   | `/api/feedback`             | 👍/👎 on an answer → `rag_log.jsonl`           |
+| POST   | `/api/feedback`             | Create/change 👍/👎; SQLite state + JSONL audit |
+| GET    | `/api/feedback/{chat}/{index}` | Restore the caller's current reaction        |
+| GET    | `/api/admin/feedback`       | Admin review queue                             |
+| PATCH  | `/api/admin/feedback/{id}`  | Approve/reject and optionally correct an answer |
 | GET    | `/api/history`              | list newest chats                              |
 | GET    | `/api/history/{id}`         | load a chat                                    |
 | DELETE | `/api/history/{id}`         | delete a chat                                  |

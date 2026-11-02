@@ -151,6 +151,10 @@
     evalProgress: $("eval-progress"),
     evalConsole: $("eval-console"),
     evalReports: $("eval-reports"),
+    feedbackStatus: $("feedback-status"),
+    feedbackRefresh: $("feedback-refresh"),
+    feedbackSummary: $("feedback-summary"),
+    feedbackList: $("feedback-list"),
     rebuildBlock: $("rebuild-block"),
     rebuildUnavailable: $("rebuild-unavailable"),
     rebuildControls: $("rebuild-controls"),
@@ -1127,6 +1131,7 @@
     loadConfluenceConfig();
     // …and the index state, reattaching to a reindex/rebuild already running.
     loadIndexState();
+    loadAdminFeedback();
     const first = dom.drawer.querySelector("button, input, select, a[href], textarea");
     if (first) first.focus();
   }
@@ -2298,14 +2303,10 @@
     bubble.appendChild(wrap);
   }
 
-  /* ---- 👍/👎 answer feedback (wave 5.4) ----
-   * Sits right under the assistant bubble, next to the sources strip. A click
-   * POSTs {chat_id, message_index, vote} to /api/feedback (the server appends it
-   * to the per-user rag_log.jsonl); the vote is then reflected on the button and
-   * both buttons are disabled. State lives ONLY in the DOM — nothing is cached
-   * or persisted client-side, so a page reload simply shows fresh buttons.
-   * `messageIndex` is the position in state.messages / history.messages, which
-   * is exactly what the chat route logs as `message_index`. */
+  /* ---- 👍/👎 answer feedback ----
+   * POST is an upsert, so a user may change the reaction. GET restores the
+   * selected vote after a reload. A 👎 exposes a reason and free-form comment;
+   * neither becomes trusted knowledge until an administrator reviews it. */
   function renderFeedback(bubble, chatId, messageIndex) {
     if (!bubble || !chatId) return;
     if (!(messageIndex >= 0)) return;
@@ -2324,34 +2325,181 @@
     const up = mk("👍", "Хороший ответ");
     const down = mk("👎", "Плохой ответ");
     const buttons = [up, down];
-    let sending = false;
+    const details = el("div", "fb-details");
+    details.hidden = true;
+    const reason = document.createElement("select");
+    reason.className = "input";
+    [
+      ["", "Что было не так?"],
+      ["incorrect", "Ответ неверный"],
+      ["missing_information", "Не хватает информации"],
+      ["wrong_sources", "Неправильные источники"],
+      ["off_topic", "Ответ не по вопросу"],
+      ["unclear", "Слишком длинно или непонятно"],
+      ["other", "Другое"],
+    ].forEach(([value, label]) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      reason.appendChild(option);
+    });
+    const comment = document.createElement("textarea");
+    comment.className = "textarea fb-comment";
+    comment.maxLength = 1000;
+    comment.placeholder = "Что именно нужно исправить? (необязательно)";
+    const saveDetails = el("button", "btn ghost", "Сохранить пояснение");
+    saveDetails.type = "button";
+    details.appendChild(reason);
+    details.appendChild(comment);
+    details.appendChild(saveDetails);
 
-    const vote = async (btn, value) => {
-      if (sending || btn.getAttribute("aria-pressed") === "true") return;
+    let sending = false;
+    let current = null;
+    let touched = false;
+
+    const paint = (item) => {
+      current = item || null;
+      const selected = current && current.vote;
+      buttons.forEach((b) => {
+        const active = (b === up && selected === "up") || (b === down && selected === "down");
+        b.setAttribute("aria-pressed", String(active));
+        b.classList.toggle("fb-selected", active);
+        b.style.opacity = selected && !active ? ".45" : "";
+      });
+      details.hidden = selected !== "down";
+      if (current) {
+        reason.value = current.reason || "";
+        comment.value = current.comment || "";
+      }
+    };
+
+    const vote = async (value, includeDetails) => {
+      if (sending) return;
+      touched = true;
       sending = true;
       buttons.forEach((b) => { b.disabled = true; });
+      saveDetails.disabled = true;
       try {
-        await apiSend("/api/feedback", "POST", {
+        const response = await apiSend("/api/feedback", "POST", {
           chat_id: chatId,
           message_index: messageIndex,
           vote: value,
+          reason: includeDetails ? (reason.value || null) : null,
+          comment: includeDetails ? comment.value.trim() : null,
         });
-        btn.setAttribute("aria-pressed", "true");
-        btn.style.borderColor = "var(--accent)";
-        btn.style.color = "var(--accent)";
-        buttons.forEach((b) => { if (b !== btn) b.style.opacity = ".35"; });
+        paint(response && response.feedback ? response.feedback : { vote: value });
+        toast("ok", "Оценка сохранена", value === "down" ? "Спасибо — администратор сможет её проверить." : "Спасибо за обратную связь.");
       } catch (e) {
         if (!e.handled) toast("warn", "Не удалось отправить оценку", e.message);
+      } finally {
         sending = false;
         buttons.forEach((b) => { b.disabled = false; });
+        saveDetails.disabled = false;
       }
     };
-    up.addEventListener("click", () => vote(up, "up"));
-    down.addEventListener("click", () => vote(down, "down"));
+    up.addEventListener("click", () => {
+      if (!current || current.vote !== "up") vote("up", false);
+    });
+    down.addEventListener("click", () => {
+      if (current && current.vote === "down") details.hidden = false;
+      else vote("down", false);
+    });
+    saveDetails.addEventListener("click", () => vote("down", true));
 
     wrap.appendChild(up);
     wrap.appendChild(down);
     bubble.appendChild(wrap);
+    bubble.appendChild(details);
+
+    apiGet("/api/feedback/" + encodeURIComponent(chatId) + "/" + messageIndex)
+      .then((data) => { if (!touched) paint(data && data.feedback); })
+      .catch(() => {}); // feedback restoration must never disturb the answer
+  }
+
+  const FEEDBACK_REASON_LABELS = {
+    incorrect: "Ответ неверный",
+    missing_information: "Не хватает информации",
+    wrong_sources: "Неправильные источники",
+    off_topic: "Ответ не по вопросу",
+    unclear: "Слишком длинно или непонятно",
+    other: "Другое",
+  };
+
+  function feedbackCard(item) {
+    const card = el("article", "feedback-card");
+    const top = el("div", "feedback-card-head");
+    top.appendChild(el("b", "", item.vote === "up" ? "👍 Хороший ответ" : "👎 Требует внимания"));
+    top.appendChild(el("span", "feedback-status", item.status === "approved" ? "Подтверждён" : (item.status === "rejected" ? "Отклонён" : "Новый")));
+    card.appendChild(top);
+
+    card.appendChild(el("div", "feedback-label", "Вопрос"));
+    card.appendChild(el("div", "feedback-text", item.question || "Вопрос не найден в журнале"));
+    card.appendChild(el("div", "feedback-label", "Ответ агента"));
+    card.appendChild(el("div", "feedback-text feedback-answer", item.answer || "Ответ не найден в журнале"));
+    if (item.reason || item.comment) {
+      card.appendChild(el("div", "feedback-label", "Комментарий пользователя"));
+      const reasonText = item.reason ? (FEEDBACK_REASON_LABELS[item.reason] || item.reason) : "";
+      card.appendChild(el("div", "feedback-text", [reasonText, item.comment].filter(Boolean).join(": ")));
+    }
+    if (Array.isArray(item.sources) && item.sources.length) {
+      card.appendChild(el("div", "feedback-label", "Источники"));
+      card.appendChild(el("div", "feedback-text feedback-sources", item.sources.map((s) => s.title || s.path || "Источник").join("; ")));
+    }
+
+    const corrected = document.createElement("textarea");
+    corrected.className = "textarea feedback-correction";
+    corrected.placeholder = "Исправленный проверенный ответ. Если оставить пустым, будет подтверждён исходный ответ.";
+    corrected.value = item.corrected_answer || "";
+    card.appendChild(corrected);
+    const globalLine = el("label", "checkline feedback-global");
+    const globalCheck = document.createElement("input");
+    globalCheck.type = "checkbox";
+    globalCheck.checked = Boolean(item.applies_globally);
+    globalLine.appendChild(globalCheck);
+    globalLine.appendChild(document.createTextNode("Применять этот ответ для всех пользователей"));
+    card.appendChild(globalLine);
+    const actions = el("div", "section-actions");
+    const approve = el("button", "btn primary", "Подтвердить");
+    approve.type = "button";
+    const reject = el("button", "btn ghost", "Отклонить");
+    reject.type = "button";
+    actions.appendChild(approve);
+    actions.appendChild(reject);
+    card.appendChild(actions);
+
+    const review = async (status) => {
+      approve.disabled = reject.disabled = true;
+      try {
+        await apiSend("/api/admin/feedback/" + item.id, "PATCH", {
+          status,
+          corrected_answer: corrected.value.trim() || null,
+          applies_globally: status === "approved" && globalCheck.checked,
+        });
+        toast("ok", status === "approved" ? "Ответ подтверждён" : "Отзыв отклонён", "");
+        loadAdminFeedback();
+      } catch (e) {
+        toast("err", "Не удалось сохранить проверку", e.message);
+        approve.disabled = reject.disabled = false;
+      }
+    };
+    approve.addEventListener("click", () => review("approved"));
+    reject.addEventListener("click", () => review("rejected"));
+    return card;
+  }
+
+  async function loadAdminFeedback() {
+    if (!dom.feedbackList || (isServerMode() && state.role !== "admin")) return;
+    const status = dom.feedbackStatus ? dom.feedbackStatus.value : "new";
+    dom.feedbackSummary.textContent = "Отзывы загружаются…";
+    try {
+      const data = await apiGet("/api/admin/feedback?status=" + encodeURIComponent(status) + "&limit=100");
+      const items = Array.isArray(data.items) ? data.items : [];
+      dom.feedbackList.textContent = "";
+      items.forEach((item) => dom.feedbackList.appendChild(feedbackCard(item)));
+      dom.feedbackSummary.textContent = items.length ? ("Найдено: " + items.length) : "Отзывов с таким статусом нет.";
+    } catch (e) {
+      dom.feedbackSummary.textContent = "Не удалось загрузить отзывы: " + e.message;
+    }
   }
 
   /* ---- inline citation linkifier ----
@@ -2744,6 +2892,8 @@
     if (dom.saveModel) dom.saveModel.addEventListener("click", saveModelSettings);
     if (dom.saveRag) dom.saveRag.addEventListener("click", saveRagSettings);
     if (dom.savePrompts) dom.savePrompts.addEventListener("click", savePromptSettings);
+    if (dom.feedbackRefresh) dom.feedbackRefresh.addEventListener("click", loadAdminFeedback);
+    if (dom.feedbackStatus) dom.feedbackStatus.addEventListener("change", loadAdminFeedback);
     PROMPT_FIELDS.forEach((f) => {
       const node = fieldNode(f);
       if (node) node.addEventListener("input", () => refreshPromptDirty(f));

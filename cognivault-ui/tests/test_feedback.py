@@ -14,6 +14,7 @@ pytest + Starlette ``TestClient``; LOCAL mode unless a test says otherwise, and
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -23,7 +24,7 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app import rag, rag_log, settings  # noqa: E402
+from app import feedback_store, rag, rag_log, settings  # noqa: E402
 from app.config import AppPaths  # noqa: E402
 from app.main import create_app  # noqa: E402
 from app.routes import chat_routes, feedback_routes  # noqa: E402
@@ -34,8 +35,11 @@ def _paths(tmp_path) -> AppPaths:
 
 
 @pytest.fixture(autouse=True)
-def _local_mode(monkeypatch):
+def _local_mode(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "is_server", lambda: False)
+    monkeypatch.setattr(
+        feedback_store, "database_path", lambda paths=None: tmp_path / "feedback.sqlite3"
+    )
 
 
 def _records(paths: AppPaths) -> list[dict]:
@@ -74,7 +78,8 @@ def test_feedback_vote_is_logged(tmp_path, monkeypatch, vote):
         )
 
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True}
+    assert resp.json()["ok"] is True
+    assert resp.json()["feedback"]["vote"] == vote
     records = _records(paths)
     assert len(records) == 1
     assert records[0]["type"] == "feedback"
@@ -154,7 +159,7 @@ def test_feedback_requires_token_in_server_mode(tmp_path, monkeypatch):
     assert len(_records(paths)) == 1
 
 
-def test_feedback_reports_write_failure(tmp_path, monkeypatch):
+def test_feedback_audit_failure_does_not_lose_saved_vote(tmp_path, monkeypatch):
     monkeypatch.setattr(feedback_routes, "resolve_paths", lambda request: _paths(tmp_path))
     monkeypatch.setattr(feedback_routes.rag_log, "append", lambda paths, record: False)
 
@@ -164,8 +169,132 @@ def test_feedback_reports_write_failure(tmp_path, monkeypatch):
             json={"chat_id": "c1", "message_index": 0, "vote": "up"},
         )
 
-    assert resp.status_code == 500
-    assert resp.json()["error"]["code"] == "LOG_WRITE_FAILED"
+    assert resp.status_code == 200
+    saved = feedback_store.get_for_answer(
+        feedback_store.database_path(),
+        user_bucket="local",
+        chat_id="c1",
+        message_index=0,
+    )
+    assert saved and saved["vote"] == "up"
+
+
+def test_feedback_vote_can_be_changed(tmp_path, monkeypatch):
+    paths = _paths(tmp_path)
+    monkeypatch.setattr(feedback_routes, "resolve_paths", lambda request: paths)
+
+    with TestClient(create_app()) as client:
+        first = client.post(
+            "/api/feedback",
+            json={"chat_id": "c1", "message_index": 2, "vote": "up"},
+        )
+        changed = client.post(
+            "/api/feedback",
+            json={
+                "chat_id": "c1",
+                "message_index": 2,
+                "vote": "down",
+                "reason": "wrong_sources",
+                "comment": "Нужна другая инструкция",
+            },
+        )
+        restored = client.get("/api/feedback/c1/2")
+
+    assert first.status_code == changed.status_code == restored.status_code == 200
+    item = restored.json()["feedback"]
+    assert item["vote"] == "down"
+    assert item["reason"] == "wrong_sources"
+    assert item["comment"] == "Нужна другая инструкция"
+    assert len(feedback_store.list_items(feedback_store.database_path())) == 1
+
+
+def test_admin_can_review_feedback(tmp_path, monkeypatch):
+    paths = _paths(tmp_path)
+    monkeypatch.setattr(feedback_routes, "resolve_paths", lambda request: paths)
+
+    with TestClient(create_app()) as client:
+        created = client.post(
+            "/api/feedback",
+            json={"chat_id": "c1", "message_index": 1, "vote": "down"},
+        ).json()["feedback"]
+        queue = client.get("/api/admin/feedback?status=new")
+        reviewed = client.patch(
+            f"/api/admin/feedback/{created['id']}",
+            json={"status": "approved", "corrected_answer": "Проверенный ответ"},
+        )
+
+    assert len(queue.json()["items"]) == 1
+    assert reviewed.status_code == 200
+    assert reviewed.json()["feedback"]["status"] == "approved"
+    assert reviewed.json()["feedback"]["corrected_answer"] == "Проверенный ответ"
+
+
+def test_approved_answer_is_tenant_scoped_until_admin_makes_it_global(tmp_path):
+    path = feedback_store.database_path()
+    item = feedback_store.upsert(
+        path,
+        user_bucket="tenant-a",
+        chat_id="c1",
+        message_index=1,
+        vote="down",
+        reason="incorrect",
+        comment=None,
+        question="Как настроить сервис?",
+        answer="Старый ответ",
+        sources=[],
+    )
+    feedback_store.review(
+        path,
+        feedback_id=item["id"],
+        status="approved",
+        corrected_answer="Проверенный ответ",
+    )
+
+    assert feedback_store.find_approved(
+        path, "как настроить сервис", user_bucket="tenant-a"
+    )
+    assert (
+        feedback_store.find_approved(
+            path, "как настроить сервис", user_bucket="tenant-b"
+        )
+        is None
+    )
+
+    feedback_store.review(
+        path,
+        feedback_id=item["id"],
+        status="approved",
+        corrected_answer="Проверенный ответ",
+        applies_globally=True,
+    )
+    assert feedback_store.find_approved(
+        path, "как настроить сервис", user_bucket="tenant-b"
+    )
+
+
+def test_regular_user_can_vote_but_cannot_review(tmp_path, monkeypatch):
+    paths = _paths(tmp_path)
+    monkeypatch.setattr(settings, "is_server", lambda: True)
+    monkeypatch.setattr(settings, "rbac_enabled", lambda: True)
+    monkeypatch.setattr(
+        settings,
+        "admin_token_hashes",
+        lambda: (hashlib.sha256(b"admin-token").hexdigest(),),
+    )
+    monkeypatch.setattr(feedback_routes, "resolve_paths", lambda request: paths)
+    headers = {"Authorization": "Bearer user-token"}
+
+    with TestClient(create_app()) as client:
+        vote = client.post(
+            "/api/feedback",
+            json={"chat_id": "c1", "message_index": 1, "vote": "up"},
+            headers=headers,
+        )
+        queue = client.get("/api/admin/feedback", headers=headers)
+
+    assert vote.status_code == 200
+    assert queue.status_code == 403
+    assert queue.json()["error"]["code"] == "FORBIDDEN"
 
 
 # --------------------------------------------------------------------------- #
@@ -414,3 +543,33 @@ def test_chat_record_and_feedback_share_the_file(tmp_path, monkeypatch):
     assert records[0]["rag_used"] is False
     assert records[0]["message_index"] == records[1]["message_index"] == 1
     assert records[0]["chat_id"] == records[1]["chat_id"] == chat_id
+
+
+def test_approved_correction_is_reused_for_the_same_question(tmp_path, monkeypatch):
+    paths = _paths(tmp_path)
+    _install_chat(
+        monkeypatch,
+        paths,
+        sources=[{"n": 1, "title": "Инструкция", "path": "notes/a.md"}],
+        answer="Первоначальный неверный ответ",
+    )
+    monkeypatch.setattr(feedback_routes, "resolve_paths", lambda request: paths)
+
+    with TestClient(create_app()) as client:
+        first = _ask(client)
+        chat_id = dict(_parse_sse(first.text))["meta"]["chat_id"]
+        item = client.post(
+            "/api/feedback",
+            json={"chat_id": chat_id, "message_index": 3, "vote": "down"},
+        ).json()["feedback"]
+        client.patch(
+            f"/api/admin/feedback/{item['id']}",
+            json={"status": "approved", "corrected_answer": "Проверенный ответ"},
+        )
+        repeated = _ask(client)
+
+    events = _parse_sse(repeated.text)
+    assert dict(events)["token"]["text"] == "Проверенный ответ"
+    assert dict(events)["done"]["finish_reason"] == "verified_feedback"
+    last_request = [r for r in _records(paths) if r.get("type") == "request"][-1]
+    assert last_request["intent"] == "verified_feedback"

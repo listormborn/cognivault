@@ -22,6 +22,7 @@ data:
   COGNIVAULT_BASE_URL: "http://cognivault:3000"
   UI_PORT: "8787"
   UI_DATA_DIR: "/data"
+  UI_FEEDBACK_DB_PATH: "/data/feedback.sqlite3"
   # Уровень логов самого приложения (логгеры cognivault-ui.*). INFO показывает
   # второй проход грейдера, пропущенные фрагменты и query_id KitAI — без этого
   # деградация конвейера в логе пода не видна. DEBUG на время разбора инцидента.

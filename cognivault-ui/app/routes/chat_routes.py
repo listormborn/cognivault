@@ -15,10 +15,19 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .. import cognivault, history, llm, rag, rag_log, rag_pipeline, settings
+from .. import (
+    cognivault,
+    feedback_store,
+    history,
+    llm,
+    rag,
+    rag_log,
+    rag_pipeline,
+    settings,
+)
 from ..config import AppPaths
 from ..confluence import store as confluence_store
-from ..deps import cv_context, resolve_paths
+from ..deps import cv_context, get_token, resolve_paths, user_bucket
 from ..llm_errors import GigaChatCertMissing, GigaChatError
 from ..sse import format_sse, sse_error
 from ..tokens import estimate_messages_tokens, trim_history
@@ -547,6 +556,46 @@ async def chat(request: Request) -> Any:
                 send = list(outgoing)
 
                 if use_rag:
+                    # An administrator-approved answer is trusted only for the
+                    # same normalised question.  It bypasses a model call, so a
+                    # known correction is deterministic and cannot regress back
+                    # to the answer that received 👎.  Similar/semantic matching
+                    # is deliberately not attempted here: a near-match can be a
+                    # materially different question.
+                    try:
+                        verified = feedback_store.find_approved(
+                            feedback_store.database_path(paths),
+                            question_raw,
+                            user_bucket=(
+                                user_bucket(get_token(request))
+                                if settings.is_server()
+                                else "local"
+                            ),
+                        )
+                    except Exception:  # noqa: BLE001 — feedback is an optional aid
+                        verified = None
+                        log.exception("approved feedback lookup failed")
+                    if verified:
+                        intent = "verified_feedback"
+                        full_text = str(verified.get("verified_answer") or "")
+                        raw_sources = verified.get("sources")
+                        sources = raw_sources if isinstance(raw_sources, list) else []
+                        rag_used = True
+                        finish_reason = "verified_feedback"
+                        log.info(
+                            "chat %s: used administrator-approved answer %s",
+                            chat_id,
+                            verified.get("id"),
+                        )
+                        yield format_sse(
+                            "sources", {"sources": sources, "context_chars": 0}
+                        )
+                        yield format_sse("token", {"text": full_text})
+                        yield format_sse(
+                            "done", {"chat_id": chat_id, "finish_reason": finish_reason}
+                        )
+                        return
+
                     query = _last_user_content(outgoing)
                     rag_started = time.perf_counter()
                     ctx = await rag.build_rag_context(
