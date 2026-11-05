@@ -360,6 +360,7 @@ def test_condense_rewrites_question(monkeypatch):
     assert (
         'Ответ строго в JSON: {"intent": "...", "standalone_question": "..." | null,'
         ' "uses_history": true | false,'
+        ' "clarification_question": "..." | null,'
         ' "scope": "document" | "corpus",'
         ' "answer_shape": "fact" | "list" | "procedure"}'
     ) in calls[0]
@@ -409,6 +410,52 @@ def test_condense_resolves_short_example_existence_followup(monkeypatch):
     assert result.question == "Есть ли примеры для Fincert Exporter?"
 
 
+def test_condense_returns_specific_question_for_ambiguous_context(monkeypatch):
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {
+            "intent": "context_clarification",
+            "standalone_question": None,
+            "uses_history": True,
+            "clarification_question": (
+                "Уточните, пожалуйста: речь о YAFCA или Fincert Exporter?"
+            ),
+        },
+    )
+
+    result = asyncio.run(
+        rag_pipeline.condense("Как его настроить?", _history(), {}, {})
+    )
+
+    assert result.intent == rag_pipeline.CONTEXT_CLARIFICATION_INTENT
+    assert result.question == (
+        "Уточните, пожалуйста: речь о YAFCA или Fincert Exporter?"
+    )
+
+
+def test_answer_to_context_clarification_restores_original_question(monkeypatch):
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {
+            "intent": "kb_question",
+            "standalone_question": "Как настроить Fincert Exporter?",
+            "uses_history": True,
+        },
+    )
+    history = [
+        {"role": "user", "content": "Как его настроить?"},
+        {
+            "role": "assistant",
+            "content": "Уточните, пожалуйста: речь о YAFCA или Fincert Exporter?",
+        },
+    ]
+
+    result = asyncio.run(rag_pipeline.condense("Fincert Exporter", history, {}, {}))
+
+    assert result.intent == "kb_question"
+    assert result.question == "Как настроить Fincert Exporter?"
+
+
 def test_condense_history_capped_at_six_turns(monkeypatch):
     calls = _install_complete_json(monkeypatch, lambda p: {"intent": "kb_question"})
     messages = [
@@ -424,8 +471,8 @@ def test_condense_history_capped_at_six_turns(monkeypatch):
     assert "реплика13" not in history_block and "реплика14" in history_block
 
 
-def test_condense_bad_json_falls_back_to_raw_question(monkeypatch, caplog):
-    """Кривой ответ → kb_question с сырым вопросом (и warning в лог)."""
+def test_condense_bad_json_asks_to_clarify_dependent_question(monkeypatch, caplog):
+    """Кривой ответ не должен отправлять зависимый вопрос в широкий поиск."""
 
     def handler(prompt):
         return {"нет": "нужных полей"}
@@ -437,11 +484,14 @@ def test_condense_bad_json_falls_back_to_raw_question(monkeypatch, caplog):
             rag_pipeline.condense("а как его настроить", _history(), {}, {})
         )
 
-    assert (intent, question) == ("kb_question", "а как его настроить")
+    assert (intent, question) == (
+        rag_pipeline.CONTEXT_CLARIFICATION_INTENT,
+        rag_pipeline.CONTEXT_CLARIFICATION_ANSWER,
+    )
     assert caplog.records
 
 
-def test_condense_call_failure_falls_back(monkeypatch, caplog):
+def test_condense_call_failure_asks_to_clarify(monkeypatch, caplog):
     async def boom(messages, gcfg, **kwargs):
         raise RuntimeError("GIGACHAT_BAD_JSON")
 
@@ -454,7 +504,10 @@ def test_condense_call_failure_falls_back(monkeypatch, caplog):
             rag_pipeline.condense("а как его настроить", _history(), {}, {})
         )
 
-    assert (intent, question) == ("kb_question", "а как его настроить")
+    assert (intent, question) == (
+        rag_pipeline.CONTEXT_CLARIFICATION_INTENT,
+        rag_pipeline.CONTEXT_CLARIFICATION_ANSWER,
+    )
     assert caplog.records
 
 
@@ -1109,6 +1162,45 @@ def test_clarify_skips_retrieval_but_keeps_a_system_turn(monkeypatch):
     assert seen == []
 
 
+def test_ambiguous_context_returns_question_without_retrieval(monkeypatch):
+    seen = _install_retrieval(monkeypatch, [_frag(1)])
+    clarification = "Уточните, пожалуйста: речь о YAFCA или Fincert?"
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {
+            "intent": "context_clarification",
+            "clarification_question": clarification,
+            "uses_history": True,
+        },
+    )
+
+    ctx = _build("Как его настроить?", _history())
+
+    assert ctx.intent == rag_pipeline.CONTEXT_CLARIFICATION_INTENT
+    assert ctx.answer_override == clarification
+    assert ctx.standalone_question == "Как его настроить?"
+    assert ctx.sources == []
+    assert seen == [], "неоднозначный вопрос не должен запускать поиск"
+
+
+def test_failed_context_resolution_returns_question_without_retrieval(monkeypatch):
+    seen = _install_retrieval(monkeypatch, [_frag(1)])
+
+    async def fail_condense(*args, **kwargs):
+        raise RuntimeError("KitAI unavailable")
+
+    monkeypatch.setattr(
+        rag_pipeline.llm, "complete_json", fail_condense, raising=False
+    )
+
+    ctx = _build("Как его настроить?", _history())
+
+    assert ctx.intent == rag_pipeline.CONTEXT_CLARIFICATION_INTENT
+    assert ctx.answer_override == rag_pipeline.CONTEXT_CLARIFICATION_ANSWER
+    assert ctx.sources == []
+    assert seen == [], "сбой разрешения контекста не должен включать широкий поиск"
+
+
 # --------------------------------------------------------------------------- #
 # Эвристика поверх ответа модели: ложный smalltalk
 # --------------------------------------------------------------------------- #
@@ -1157,7 +1249,8 @@ def test_condense_prompt_biases_towards_kb_question(monkeypatch):
 
     asyncio.run(rag_pipeline.condense("а как его настроить", _history(), {}, {}))
 
-    assert 'При любом сомнении выбирай "kb_question"' in calls[0]
+    assert 'Между "smalltalk" и "kb_question" при сомнении выбирай "kb_question"' in calls[0]
+    assert '"context_clarification"' in calls[0]
     assert "приветствий, благодарностей" in calls[0]
 
 
@@ -1203,7 +1296,7 @@ def test_complete_new_question_is_not_contaminated_by_history(monkeypatch):
     assert result.question == question
 
 
-def test_explicit_history_flag_false_keeps_even_a_pronominal_question(monkeypatch):
+def test_explicit_history_flag_false_does_not_search_pronominal_question(monkeypatch):
     _install_complete_json(
         monkeypatch,
         lambda prompt: {
@@ -1216,7 +1309,8 @@ def test_explicit_history_flag_false_keeps_even_a_pronominal_question(monkeypatc
 
     result = asyncio.run(rag_pipeline.condense(question, _history(), {}, {}))
 
-    assert result.question == question
+    assert result.intent == rag_pipeline.CONTEXT_CLARIFICATION_INTENT
+    assert result.question == rag_pipeline.CONTEXT_CLARIFICATION_ANSWER
 
 
 def test_refusal_when_everything_below_threshold(monkeypatch):
@@ -1737,7 +1831,8 @@ def test_hidden_call_is_bounded_by_a_wall_clock_deadline(
         result = asyncio.run(
             rag_pipeline.condense("а как его настроить", _history(), {}, {})
         )
-        assert result == ("kb_question", "а как его настроить", "document", "fact")
+        assert result.intent == rag_pipeline.CONTEXT_CLARIFICATION_INTENT
+        assert result.question == rag_pipeline.CONTEXT_CLARIFICATION_ANSWER
     else:
         grades = asyncio.run(rag_pipeline.grade("вопрос", [_frag(1)], {}, {}))
         assert grades == [None]
@@ -2117,7 +2212,8 @@ def test_condense_report_failed(monkeypatch):
         rag_pipeline.condense_with_report("а как его настроить", _history(), {}, _GCFG)
     )
 
-    assert condensed == ("kb_question", "а как его настроить", "document", "fact")
+    assert condensed.intent == rag_pipeline.CONTEXT_CLARIFICATION_INTENT
+    assert condensed.question == rag_pipeline.CONTEXT_CLARIFICATION_ANSWER
     assert report["status"] == "failed"
     assert report["error"] == "RuntimeError: нет связи"
     assert report["model"] == "GigaChat-Test"
@@ -2135,7 +2231,8 @@ def test_condense_report_truncated_falls_back(monkeypatch):
         rag_pipeline.condense_with_report("а как его настроить", _history(), {}, _GCFG)
     )
 
-    assert condensed.question == "а как его настроить"  # обрубку не верим
+    assert condensed.intent == rag_pipeline.CONTEXT_CLARIFICATION_INTENT
+    assert condensed.question == rag_pipeline.CONTEXT_CLARIFICATION_ANSWER
     assert report["status"] == "truncated"
     assert report["finish_reason"] == "length"
 

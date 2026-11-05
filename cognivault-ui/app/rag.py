@@ -377,8 +377,9 @@ class RagContext:
       ``grade`` carrying the grader's 1..5 score (``None`` when not graded);
     * ``notice`` — user-visible reason RAG was skipped (retrieval failure);
     * ``context_chars`` — size of the rendered sources block, for telemetry;
-    * ``intent`` — ``smalltalk`` / ``clarify`` / ``kb_question`` from the
-      condense step; the first two mean retrieval was skipped on purpose;
+    * ``intent`` — ``smalltalk`` / ``clarify`` / ``kb_question`` /
+      ``context_clarification`` from the condense step; the first two and the
+      clarification branch mean retrieval was skipped on purpose;
     * ``standalone_question`` — the rewritten, self-contained question actually
       used for retrieval and for the final user turn;
     * ``candidates`` — every retrieved candidate BEFORE selection
@@ -990,7 +991,22 @@ async def _build_auto(
         query, messages, rcfg, gcfg
     )
     hidden: dict[str, Any] = {"condense": condense_report, "grader": None}
-    intent, rq, scope, shape = condensed
+    intent = condensed.intent
+    rq = condensed.question
+    scope = condensed.scope
+    shape = condensed.shape
+    if intent == rag_pipeline.CONTEXT_CLARIFICATION_INTENT:
+        return RagContext(
+            intent=intent,
+            standalone_question=query,
+            answer_override=(
+                _NO_EXAMPLE_SUBJECT
+                if rag_pipeline.requests_example(query)
+                else rq
+            ),
+            scope=scope,
+            hidden_calls=hidden,
+        )
     raw_example_request = rag_pipeline.requests_example(query)
     example_request = raw_example_request or rag_pipeline.requests_example(rq)
     raw_exact_example = rag_pipeline.requires_exact_example(query)

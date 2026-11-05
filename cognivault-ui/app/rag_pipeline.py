@@ -128,7 +128,17 @@ _INSURANCE_MIN_GRADE = 3
 # fragment is dropped rather than promoted.
 _OMITTED_GRADE = 2
 
-_INTENTS = ("smalltalk", "clarify", "kb_question")
+CONTEXT_CLARIFICATION_INTENT = "context_clarification"
+CONTEXT_CLARIFICATION_ANSWER = (
+    "Уточните, пожалуйста, о каком продукте, сервисе или инструменте идёт речь?"
+)
+
+_INTENTS = (
+    "smalltalk",
+    "clarify",
+    "kb_question",
+    CONTEXT_CLARIFICATION_INTENT,
+)
 _DEFAULT_INTENT = "kb_question"
 
 # What SHAPE of answer the question asks for. Routing on this is the cheapest
@@ -206,7 +216,9 @@ _CONDENSE_TASKS = """
 Задачи:
 - Определи тип реплики: "smalltalk" (приветствие, благодарность, болтовня),
   "clarify" (просьба переформулировать/уточнить уже сказанное ассистентом),
-  "kb_question" (вопрос, требующий поиска по базе знаний).
+  "kb_question" (вопрос, требующий поиска по базе знаний),
+  "context_clarification" (без уточнения нельзя однозначно определить продукт,
+  сервис, инструмент или документ, о котором спрашивает пользователь).
 - Если kb_question — переформулируй реплику в самодостаточный поисковый запрос:
   подставь вместо местоимений и отсылок конкретные названия из истории.
   Сохрани все требования пользователя к формату ответа: просьбу привести пример,
@@ -218,10 +230,20 @@ _CONDENSE_TASKS = """
   НЕ отвечай на вопрос. История — только справка для разрешения явных отсылок,
   а не тема по умолчанию. Если последняя реплика уже самодостаточна или начинает
   новую тему — верни её ДОСЛОВНО, даже если история была о другом продукте.
+- Если в истории подходит ровно ОДИН объект — восстанови его и выбери
+  "kb_question". Если подходят несколько объектов или нужный объект отсутствует —
+  выбери "context_clarification" и запиши в clarification_question один короткий
+  вопрос пользователю. Если известны 2–3 возможных объекта, перечисли их в вопросе.
+  Не выбирай объект наугад и не запускай поиск по всей базе вместо уточнения.
+- Если последняя реплика — ответ на твой предыдущий уточняющий вопрос (например,
+  только «Fincert»), восстанови с выбранным объектом ИСХОДНЫЙ вопрос пользователя,
+  выбери "kb_question" и верни полный запрос в standalone_question.
 - Поле uses_history=true ставь только когда без истории нельзя понять местоимение,
   пропущенный объект или явную отсылку («это», «его», «а как настроить?»,
   «предыдущий ответ»). Для самостоятельного нового вопроса — false.
-- При любом сомнении выбирай "kb_question". "smalltalk" — только для чистых
+- Между "smalltalk" и "kb_question" при сомнении выбирай "kb_question".
+  Не применяй это правило к неоднозначному контексту: там нужен
+  "context_clarification". "smalltalk" — только для чистых
   приветствий, благодарностей и прощаний, где нет ни одного вопроса по существу;
   если в реплике есть вопрос или просьба что-то объяснить — это "kb_question".
 - Определи охват вопроса: "document" — ответ целиком лежит в одном документе
@@ -235,7 +257,7 @@ _CONDENSE_TASKS = """
   "fact" — всё остальное (одно значение, определение, сравнение, да/нет).
   При сомнении выбирай "fact".
 
-Ответ строго в JSON: {"intent": "...", "standalone_question": "..." | null, "uses_history": true | false, "scope": "document" | "corpus", "answer_shape": "fact" | "list" | "procedure"}
+Ответ строго в JSON: {"intent": "...", "standalone_question": "..." | null, "uses_history": true | false, "clarification_question": "..." | null, "scope": "document" | "corpus", "answer_shape": "fact" | "list" | "procedure"}
 Отвечай только JSON, без рассуждений и пояснений до или после него."""
 
 _GRADE_SCALE = """
@@ -691,13 +713,19 @@ _HISTORY_REFERENCE = re.compile(
     r"там|тут|такой|такая|такое|такие|выше|предыдущ\w*|последн\w*)\b",
     re.IGNORECASE,
 )
+_LOCAL_PRONOUN_ANTECEDENT = re.compile(
+    r"\b[a-zа-яё0-9_.-]{3,}\s+(?:и|или)\s+(?:его|её|их)\b",
+    re.IGNORECASE,
+)
 
 
 def _needs_history_resolution(question: str) -> bool:
     text = " ".join(str(question or "").strip().split())
     if not text:
         return False
-    if _HISTORY_REFERENCE.search(text):
+    # «что известно про кластер и его настройку» is self-contained: «его»
+    # points to the noun in the SAME sentence, not to dialogue history.
+    if _HISTORY_REFERENCE.search(text) and not _LOCAL_PRONOUN_ANTECEDENT.search(text):
         return True
     # «Можешь привести пример сообщения?» is semantically dependent even
     # without a pronoun: the omitted object is the product discussed one turn
@@ -709,7 +737,7 @@ def _needs_history_resolution(question: str) -> bool:
     # Elliptic follow-ups: «а как настроить?», «а где посмотреть?». A longer
     # sentence such as «а как получить доступ к Fincert Bitbucket?» already
     # names its object and must stay independent from the prior dialogue.
-    if text.casefold().startswith("а ") and len(words) <= 4:
+    if text.casefold().startswith("а ") and len(words) <= 3:
         return True
     return len(words) <= 2 and words[0].casefold() in {
         "как",
@@ -721,6 +749,14 @@ def _needs_history_resolution(question: str) -> bool:
         "какая",
         "какие",
     }
+
+
+def _answers_context_clarification(history: list[dict[str, Any]]) -> bool:
+    """Whether the preceding assistant turn asked us to disambiguate context."""
+    if not history or history[-1].get("role") != "assistant":
+        return False
+    text = " ".join(str(history[-1].get("content") or "").strip().split())
+    return text.casefold().startswith(("уточните", "уточни", "для какого"))
 
 
 def detect_shape(question: str) -> str:
@@ -747,12 +783,58 @@ def _parse_shape(value: Any) -> str:
     return shape if shape in _SHAPES else DEFAULT_SHAPE
 
 
-def _fallback(question: str) -> Condensed:
-    """The safe verdict every failure path lands on: today's behaviour."""
+def _clearly_unresolved_first_turn(question: str) -> bool:
+    """Narrow first-turn cases that cannot be answered without a subject."""
+    text = " ".join(str(question or "").strip().split())
+    if requests_example(text) and not example_subject_terms(text):
+        return True
+    return bool(
+        re.match(
+            r"^(?:а\s+)?(?:как|где|когда|зачем|почему)\s+"
+            r"(?:его|её|их|это|этот|эта|эти|там|тут)\b",
+            text,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _fallback(
+    question: str,
+    *,
+    answering_clarification: bool = False,
+    has_history: bool = True,
+) -> Condensed:
+    """Fail closed when an unresolved follow-up cannot be condensed."""
+    unresolved = (
+        (_needs_history_resolution(question) if has_history else False)
+        or _clearly_unresolved_first_turn(question)
+        or answering_clarification
+    )
+    if unresolved:
+        return Condensed(
+            CONTEXT_CLARIFICATION_INTENT,
+            CONTEXT_CLARIFICATION_ANSWER,
+            corpus_scope.DEFAULT_SCOPE,
+            DEFAULT_SHAPE,
+        )
     return Condensed(_DEFAULT_INTENT, question, corpus_scope.DEFAULT_SCOPE, DEFAULT_SHAPE)
 
 
-def _parse_condense(data: dict[str, Any], question: str) -> Condensed:
+def _clarification_question(value: Any) -> str:
+    """A short, single-line clarification safe to return without generation."""
+    text = " ".join(str(value or "").strip().split())
+    if not text or len(text) > 300 or "?" not in text:
+        return CONTEXT_CLARIFICATION_ANSWER
+    return text
+
+
+def _parse_condense(
+    data: dict[str, Any],
+    question: str,
+    *,
+    answering_clarification: bool = False,
+    has_history: bool = True,
+) -> Condensed:
     """Map the model's JSON onto ``(intent, standalone_question, scope)``.
 
     ``scope`` is parsed independently of ``intent``: a turn whose intent had to
@@ -767,24 +849,54 @@ def _parse_condense(data: dict[str, Any], question: str) -> Condensed:
     intent = str(data.get("intent", "") or "").strip().strip('"').lower()
     if intent not in _INTENTS:
         log.warning("condense: неизвестный intent %r — фолбэк на kb_question", intent)
-        return Condensed(_DEFAULT_INTENT, question, scope, shape)
+        fallback = _fallback(
+            question,
+            answering_clarification=answering_clarification,
+            has_history=has_history,
+        )
+        return Condensed(fallback.intent, fallback.question, scope, shape)
     if intent == "smalltalk" and _too_substantive_for_smalltalk(question):
         log.warning(
             "condense: smalltalk на содержательной реплике — переклассифицирую в %s",
             _DEFAULT_INTENT,
         )
-        return Condensed(_DEFAULT_INTENT, question, scope, shape)
+        fallback = _fallback(
+            question,
+            answering_clarification=answering_clarification,
+            has_history=has_history,
+        )
+        return Condensed(fallback.intent, fallback.question, scope, shape)
+    if intent == CONTEXT_CLARIFICATION_INTENT:
+        return Condensed(
+            intent,
+            _clarification_question(data.get("clarification_question")),
+            scope,
+            shape,
+        )
     raw = data.get("standalone_question")
     declared = data.get("uses_history")
     model_uses_history = declared if isinstance(declared, bool) else True
-    may_rewrite = model_uses_history and _needs_history_resolution(question)
+    dependent = (
+        _needs_history_resolution(question)
+        if has_history
+        else _clearly_unresolved_first_turn(question)
+    ) or answering_clarification
+    may_rewrite = model_uses_history and dependent
     if (
         intent == "kb_question"
         and may_rewrite
         and isinstance(raw, str)
         and raw.strip()
+        and raw.strip() != question.strip()
     ):
         return Condensed(intent, raw.strip(), scope, shape)
+    if intent == "kb_question" and dependent:
+        return Condensed(
+            CONTEXT_CLARIFICATION_INTENT,
+            CONTEXT_CLARIFICATION_ANSWER,
+            scope,
+            shape,
+        )
     return Condensed(intent, question, scope, shape)
 
 
@@ -797,9 +909,11 @@ async def condense(
     """Classify the user's turn and rewrite it into a self-contained question.
 
     Returns a :class:`Condensed`. ``intent`` is one of ``smalltalk`` /
-    ``clarify`` / ``kb_question``; for the first two the caller skips retrieval
-    entirely and lets the model answer from the history. ``scope`` is
-    ``document`` / ``corpus`` and only ever adds a caveat downstream.
+    ``clarify`` / ``kb_question`` / ``context_clarification``. For the first two
+    the caller skips retrieval and lets the model answer from history; the last
+    one also skips retrieval but returns a bounded clarification question
+    directly. ``scope`` is ``document`` / ``corpus`` and only ever adds a caveat
+    downstream.
 
     The call is skipped — yielding the fail-closed triple — when the feature
     flag is off, and, unless ``rag.condense_first_turn`` is on, when there is no
@@ -838,15 +952,20 @@ async def condense_with_report(
     question — the verdicts look identical from the outside.
     """
     started = time.perf_counter()
+    history = _history_turns(messages, question)
+    answering_clarification = _answers_context_clarification(history)
     if not bool(rcfg.get("condense_enabled", True)):
-        return _fallback(question), _outcome(
+        return _fallback(
+            question,
+            answering_clarification=answering_clarification,
+            has_history=bool(history),
+        ), _outcome(
             "skipped", {}, started, detail="condense_enabled=false"
         )
 
-    history = _history_turns(messages, question)
     first_turn = not history
     if first_turn and not bool(rcfg.get("condense_first_turn", False)):
-        return _fallback(question), _outcome(
+        return _fallback(question, has_history=False), _outcome(
             "skipped", {}, started, detail="первая реплика без condense_first_turn"
         )
 
@@ -861,12 +980,16 @@ async def condense_with_report(
         )
     except Exception as exc:  # noqa: BLE001 — any failure => raw question
         log.warning(
-            "condense (модель %s): вызов не удался (%s: %s) — вопрос идёт как есть",
+            "condense (модель %s): вызов не удался (%s: %s) — безопасный фолбэк",
             trace.get("model") or "?",
             type(exc).__name__,
             exc or "без текста",
         )
-        return _fallback(question), _outcome(
+        return _fallback(
+            question,
+            answering_clarification=answering_clarification,
+            has_history=bool(history),
+        ), _outcome(
             "truncated" if _truncated(trace) else "failed",
             trace,
             started,
@@ -876,25 +999,39 @@ async def condense_with_report(
 
     if not isinstance(data, dict):
         log.warning(
-            "condense (модель %s): ответ не объект — вопрос идёт как есть",
+            "condense (модель %s): ответ не объект — безопасный фолбэк",
             trace.get("model") or "?",
         )
-        return _fallback(question), _outcome(
+        return _fallback(
+            question,
+            answering_clarification=answering_clarification,
+            has_history=bool(history),
+        ), _outcome(
             "failed", trace, started, error="TypeError: ответ не объект"
         )
     if _truncated(trace):
         log.warning(
             "condense (модель %s): ответ обрезан лимитом токенов "
-            "(finish_reason=length) — вопрос идёт как есть",
+            "(finish_reason=length) — безопасный фолбэк",
             trace.get("model") or "?",
         )
-        return _fallback(question), _outcome(
+        return _fallback(
+            question,
+            answering_clarification=answering_clarification,
+            has_history=bool(history),
+        ), _outcome(
             "truncated", trace, started, detail=_error_detail(None, trace)
         )
 
-    parsed = _parse_condense(data, question)
+    parsed = _parse_condense(
+        data,
+        question,
+        answering_clarification=answering_clarification,
+        has_history=bool(history),
+    )
     if first_turn:
-        parsed = Condensed(_DEFAULT_INTENT, question, parsed.scope, parsed.shape)
+        if parsed.intent != CONTEXT_CLARIFICATION_INTENT:
+            parsed = Condensed(_DEFAULT_INTENT, question, parsed.scope, parsed.shape)
     return parsed, _outcome("ok", trace, started)
 
 

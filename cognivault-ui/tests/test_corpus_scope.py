@@ -811,7 +811,18 @@ def _install_retrieval(monkeypatch) -> list[str]:
         prompt = messages[-1]["content"]
         seen.append("condense" if "Определи тип реплики" in prompt else "grade")
         if "Определи тип реплики" in prompt:
-            return {"intent": "kb_question", "standalone_question": None}
+            question = prompt.split("Последняя реплика пользователя: ", 1)[1].split(
+                "\n", 1
+            )[0]
+            resolved = {
+                "Какие разделы?": "Какие разделы есть у продукта Fincert?",
+                "Какие темы?": "Какие темы описаны для продукта Fincert?",
+            }.get(question)
+            return {
+                "intent": "kb_question",
+                "standalone_question": resolved,
+                "uses_history": bool(resolved),
+            }
         return {"grades": [{"id": 1, "score": 5}]}
 
     monkeypatch.setattr(rag.cognivault, "hybrid_search", fake_hybrid)
