@@ -367,6 +367,27 @@ def test_condense_rewrites_question(monkeypatch):
     assert "что такое SberOSC" in calls[0]
 
 
+def test_condense_resolves_example_followup_without_a_pronoun(monkeypatch):
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {
+            "intent": "kb_question",
+            "standalone_question": "Приведи пример сообщения Fincert Exporter",
+            "uses_history": True,
+        },
+    )
+    history = [
+        {"role": "user", "content": "Как работает Fincert Exporter?"},
+        {"role": "assistant", "content": "Он формирует сообщения для Fincert."},
+    ]
+
+    result = asyncio.run(
+        rag_pipeline.condense("Можешь привести пример сообщения?", history, {}, {})
+    )
+
+    assert result.question == "Приведи пример сообщения Fincert Exporter"
+
+
 def test_condense_history_capped_at_six_turns(monkeypatch):
     calls = _install_complete_json(monkeypatch, lambda p: {"intent": "kb_question"})
     messages = [
@@ -1285,7 +1306,7 @@ def test_message_example_uses_only_the_named_tool_source(monkeypatch):
 def test_message_example_without_a_named_tool_refuses_to_guess(monkeypatch):
     hit = _frag(1, text="```json\n{\"tool\": \"yafca\"}\n```")
     hit.update(path="YAFCA/Messages.md", title="YAFCA Messages")
-    _install_retrieval(monkeypatch, [hit])
+    seen = _install_retrieval(monkeypatch, [hit])
     _install_complete_json(
         monkeypatch,
         lambda prompt: {"intent": "kb_question", "standalone_question": None}
@@ -1295,8 +1316,35 @@ def test_message_example_without_a_named_tool_refuses_to_guess(monkeypatch):
 
     ctx = _build("Покажи пример сообщения", _history())
 
-    assert ctx.answer_override == rag._NO_EXACT_EXAMPLE
+    assert ctx.answer_override == rag._NO_EXAMPLE_SUBJECT
     assert ctx.sources == []
+    assert seen == [], "неразрешённое продолжение не должно искать по всей базе"
+
+
+def test_resolved_message_followup_searches_only_with_restored_tool(monkeypatch):
+    hit = _frag(1, text="```json\n{\"tool\": \"fincert\"}\n```")
+    hit.update(path="Fincert/Exporter/Messages.md", title="Fincert Exporter")
+    seen = _install_retrieval(monkeypatch, [hit])
+
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {
+            "intent": "kb_question",
+            "standalone_question": "Приведи пример сообщения Fincert Exporter",
+            "uses_history": True,
+        }
+        if _is_condense(prompt)
+        else {"grades": [{"id": 1, "score": 5}]},
+    )
+    history = [
+        {"role": "user", "content": "Как работает Fincert Exporter?"},
+        {"role": "assistant", "content": "Он формирует сообщения для Fincert."},
+    ]
+
+    ctx = _build("Можешь привести пример сообщения?", history)
+
+    assert seen[0][0] == "Приведи пример сообщения Fincert Exporter"
+    assert '"tool": "fincert"' in (ctx.answer_override or "")
 
 
 def test_partial_grader_failure_still_answers(monkeypatch):

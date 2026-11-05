@@ -276,6 +276,11 @@ _NO_EXACT_EXAMPLE = (
     "или придумывать недостающие значения."
 )
 
+_NO_EXAMPLE_SUBJECT = (
+    "Уточните, для какого именно инструмента или сервиса нужен пример. "
+    "Без этого я не буду искать по всей базе и объединять материалы разных продуктов."
+)
+
 # Auto-mode internal retrieval width (independent of any stored `limit`): the
 # Answer shapes that need a wider window than a top-k slice (see `_build_auto`).
 _WIDE_SHAPES = ("list", "procedure")
@@ -971,6 +976,15 @@ async def _build_auto(
     answer_query = rq
     if raw_exact_example and not rag_pipeline.requires_exact_example(rq):
         answer_query = f"{rq}\nТребование исходного вопроса: {query}"
+
+    if exact_example and not rag_pipeline.example_subject_terms(rq):
+        return RagContext(
+            intent=intent,
+            standalone_question=rq,
+            answer_override=_NO_EXAMPLE_SUBJECT,
+            scope=scope,
+            hidden_calls=hidden,
+        )
 
     # Route on the SHAPE of the answer the user asked for. A five-fragment top-k
     # answers «какой ID у потока X» perfectly and cannot answer «перечисли все
