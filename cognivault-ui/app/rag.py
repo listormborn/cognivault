@@ -20,6 +20,7 @@ sources remain for backward compatibility.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -279,6 +280,28 @@ _NO_EXACT_EXAMPLE = (
 _NO_EXAMPLE_SUBJECT = (
     "Уточните, для какого именно инструмента или сервиса нужен пример. "
     "Без этого я не буду искать по всей базе и объединять материалы разных продуктов."
+)
+
+# Requests to perform a real-world action are outside the assistant's contract.
+# Keep this guard deterministic and before condense/retrieval: asking the model
+# to classify such a request allowed it to improvise an offer (for example,
+# "I can help choose a refrigerator") even though neither shopping nor product
+# recommendations are backed by the connected knowledge base.
+_EXTERNAL_ACTION_REQUEST = re.compile(
+    r"^\s*(?:пожалуйста[\s,]+)?"
+    r"(?:(?:(?:ты\s+)?(?:можешь|можете)\s+(?:мне\s+)?)|"
+    r"(?:помоги(?:те)?\s+(?:мне\s+)?))?"
+    r"(?:купи(?:те)?|купить|закажи(?:те)?|заказать|"
+    r"оплати(?:те)?|оплатить|забронируй(?:те)?|забронировать|"
+    r"доставь(?:те)?|доставить|вызови(?:те)?|вызвать|"
+    r"переведи(?:те)?\s+деньги)\b",
+    re.IGNORECASE,
+)
+
+_EXTERNAL_ACTION_ANSWER = (
+    "Я не могу покупать товары, оформлять заказы, проводить оплату или выполнять "
+    "другие действия во внешних сервисах. Я отвечаю на вопросы по подключённой "
+    "базе знаний — о представленных в ней продуктах, процессах и инструментах."
 )
 
 # Auto-mode internal retrieval width (independent of any stored `limit`): the
@@ -1487,6 +1510,13 @@ async def build_rag_context(
     / :data:`CONTEXT_REMINDER`, so an untouched (or cleared) setting keeps
     tracking the shipped prompt.
     """
+    if _EXTERNAL_ACTION_REQUEST.search(str(query or "")):
+        return RagContext(
+            intent="out_of_scope",
+            standalone_question=query,
+            answer_override=_EXTERNAL_ACTION_ANSWER,
+        )
+
     mode = str(rcfg.get("mode", "auto"))
     if mode == "auto":
         return await _build_auto(query, rcfg, gcfg or {}, messages, cvcfg, prompts)

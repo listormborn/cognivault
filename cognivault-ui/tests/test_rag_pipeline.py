@@ -1006,6 +1006,49 @@ def _build(query, messages=None, **rcfg):
     return asyncio.run(rag.build_rag_context(query, cfg, None, {}, messages))
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Купи холодильник",
+        "Пожалуйста, закажите холодильник",
+        "Можешь мне купить холодильник?",
+        "Помоги забронировать билет",
+        "Оплати заказ",
+    ],
+)
+def test_external_action_is_refused_before_model_and_retrieval(monkeypatch, query):
+    """Агент не предлагает покупки и не ищет товары в корпоративной базе."""
+    seen = _install_retrieval(monkeypatch, [_frag(1)])
+
+    async def must_not_call_model(*args, **kwargs):
+        raise AssertionError("model must not be called for an external action")
+
+    monkeypatch.setattr(
+        rag_pipeline.llm, "complete_json", must_not_call_model, raising=False
+    )
+
+    ctx = _build(query, _history())
+
+    assert ctx.intent == "out_of_scope"
+    assert ctx.answer_override == rag._EXTERNAL_ACTION_ANSWER
+    assert ctx.standalone_question == query
+    assert ctx.sources == []
+    assert seen == []
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Как купить лицензию Fincert?",
+        "Как заказать доступ к Bitbucket Fincert?",
+        "Какие способы оплаты описаны в документации?",
+    ],
+)
+def test_informational_action_question_is_not_blocked(query):
+    """Вопрос о документированном процессе — не просьба выполнить действие."""
+    assert rag._EXTERNAL_ACTION_REQUEST.search(query) is None
+
+
 def test_smalltalk_skips_retrieval_but_keeps_a_system_turn(monkeypatch):
     """Поиска нет, но системные правила есть — иначе ответ пойдёт из памяти модели."""
     seen = _install_retrieval(monkeypatch, [_frag(1)])
