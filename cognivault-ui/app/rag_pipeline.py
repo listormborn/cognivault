@@ -150,20 +150,34 @@ _ARTIFACT_CREATION_REQUEST = re.compile(
     r"(?:\b(?:привед\w*|покаж\w*|дай|дайте|напиш\w*|состав\w*|"
     r"сгенерир\w*|созда\w*)\b(?:\s+\w+){0,2}\s+"
     r"\b(?:конфигурац\w*|конфиг\w*|код\w*|yaml|yml|json|sql|"
-    r"команд\w*|скрипт\w*|манифест\w*)\b)"
+    r"команд\w*|скрипт\w*|манифест\w*|сообщен\w*|payload\w*)\b)"
     r"|(?:\bкак\s+выглядит\b(?:\s+\w+){0,2}\s+"
     r"\b(?:конфигурац\w*|конфиг\w*|код\w*|yaml|yml|json|sql|"
-    r"команд\w*|скрипт\w*|манифест\w*)\b)",
+    r"команд\w*|скрипт\w*|манифест\w*|сообщен\w*|payload\w*)\b)",
     re.IGNORECASE,
 )
 _TECHNICAL_ARTIFACT = re.compile(
     r"\b(?:конфигурац\w*|конфиг\w*|код\w*|yaml|yml|json|sql|"
-    r"команд\w*|скрипт\w*|манифест\w*)\b",
+    r"команд\w*|скрипт\w*|манифест\w*|сообщен\w*|payload\w*)\b",
     re.IGNORECASE,
 )
 _FENCED_EXAMPLE = re.compile(
     r"(?ms)^```[^\n]*\n.*?^```[ \t]*$"
 )
+_SUBJECT_TOKEN = re.compile(r"[a-zа-яё0-9]+(?:[-_.][a-zа-яё0-9]+)*", re.IGNORECASE)
+_EXAMPLE_GENERIC_PREFIXES = (
+    "пример", "образец", "шаблон", "сэмпл", "сообщен", "payload",
+    "конфиг", "код", "yaml", "yml", "json", "sql", "команд", "скрипт",
+    "манифест", "покаж", "привед", "напиш", "состав", "созда", "сгенер",
+    "готов", "документ", "требован", "исходн", "вопрос", "продукт", "сервис",
+    "инструмент", "структур", "формат",
+)
+_EXAMPLE_STOPWORDS = {
+    "а", "без", "в", "во", "вы", "где", "дайте", "дай", "для", "его",
+    "её", "и", "из", "или", "как", "какая", "какие", "какой", "мне",
+    "на", "нужен", "нужна", "нужно", "о", "по", "покажи", "при", "с",
+    "со", "такой", "такую", "то", "у", "что", "это", "этого", "этой",
+}
 
 _ROLE_LABELS = {"user": "Пользователь", "assistant": "Ассистент"}
 
@@ -297,6 +311,36 @@ def first_fenced_example(text: str) -> str | None:
     """
     match = _FENCED_EXAMPLE.search(str(text or ""))
     return match.group(0).strip() if match else None
+
+
+def example_subject_terms(question: str) -> set[str]:
+    """Extract product/tool anchors that an example source must identify."""
+    terms: set[str] = set()
+    for token in _SUBJECT_TOKEN.findall(str(question or "").casefold()):
+        pieces = {token, *re.split(r"[-_.]", token)}
+        for piece in pieces:
+            if len(piece) < 3 or piece in _EXAMPLE_STOPWORDS:
+                continue
+            if any(piece.startswith(prefix) for prefix in _EXAMPLE_GENERIC_PREFIXES):
+                continue
+            terms.add(piece)
+    return terms
+
+
+def source_matches_example_subject(question: str, source: dict[str, Any]) -> bool:
+    """Require the requested tool/product to occur in source identity metadata."""
+    terms = example_subject_terms(question)
+    if not terms:
+        return False
+    identity = " ".join(
+        str(source.get(key) or "") for key in ("title", "path", "section_path")
+    ).casefold()
+    for term in terms:
+        if term in identity:
+            return True
+        if len(term) >= 6 and term[:-2] in identity:
+            return True
+    return False
 
 
 async def _call(

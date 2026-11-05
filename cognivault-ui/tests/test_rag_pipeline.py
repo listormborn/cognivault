@@ -146,6 +146,7 @@ def test_exact_example_selection_keeps_only_confirmed_evidence():
     [
         ("Приведи пример конфигурации сервиса Fincert", True),
         ("Покажи пример YAML для Fincert", True),
+        ("Приведи пример сообщения для Fincert Exporter", True),
         ("Напиши конфиг для Fincert", True),
         ("Как выглядит JSON для Fincert?", True),
         ("Какие параметры конфигурации есть у Fincert?", False),
@@ -1222,7 +1223,9 @@ def test_condense_cannot_drop_the_exact_example_requirement(monkeypatch):
 
 def test_exact_example_is_returned_verbatim_without_answer_generation(monkeypatch):
     example = "```yaml\nservice: fincert\nmode: strict\n```"
-    _install_retrieval(monkeypatch, [_frag(1, text=f"Документация\n\n{example}")])
+    hit = _frag(1, text=f"Документация\n\n{example}")
+    hit.update(path="Fincert/Exporter.md", title="Fincert Exporter")
+    _install_retrieval(monkeypatch, [hit])
     _install_complete_json(
         monkeypatch,
         lambda prompt: {"intent": "kb_question", "standalone_question": None}
@@ -1252,6 +1255,45 @@ def test_exact_example_refuses_even_high_grade_prose_without_code(monkeypatch):
     )
 
     ctx = _build("Приведи пример конфигурации Fincert", _history())
+
+    assert ctx.answer_override == rag._NO_EXACT_EXAMPLE
+    assert ctx.sources == []
+
+
+def test_message_example_uses_only_the_named_tool_source(monkeypatch):
+    yafca = _frag(1, text="```json\n{\"tool\": \"yafca\"}\n```")
+    yafca.update(path="YAFCA/Messages.md", title="YAFCA Messages")
+    fincert = _frag(2, text="```json\n{\"tool\": \"fincert\"}\n```")
+    fincert.update(path="Fincert/Exporter/Messages.md", title="Fincert Exporter")
+    _install_retrieval(monkeypatch, [yafca, fincert])
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {"intent": "kb_question", "standalone_question": None}
+        if _is_condense(prompt)
+        else {"grades": [{"id": 1, "score": 5}, {"id": 2, "score": 5}]},
+    )
+
+    ctx = _build("Приведи пример сообщения Fincert Exporter", _history())
+
+    assert '"tool": "fincert"' in (ctx.answer_override or "")
+    assert "yafca" not in (ctx.answer_override or "").casefold()
+    assert [source["path"] for source in ctx.sources] == [
+        "Fincert/Exporter/Messages.md"
+    ]
+
+
+def test_message_example_without_a_named_tool_refuses_to_guess(monkeypatch):
+    hit = _frag(1, text="```json\n{\"tool\": \"yafca\"}\n```")
+    hit.update(path="YAFCA/Messages.md", title="YAFCA Messages")
+    _install_retrieval(monkeypatch, [hit])
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {"intent": "kb_question", "standalone_question": None}
+        if _is_condense(prompt)
+        else {"grades": [{"id": 1, "score": 5}]},
+    )
+
+    ctx = _build("Покажи пример сообщения", _history())
 
     assert ctx.answer_override == rag._NO_EXACT_EXAMPLE
     assert ctx.sources == []

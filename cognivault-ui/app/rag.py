@@ -271,8 +271,8 @@ _NO_ANSWER = (
 )
 
 _NO_EXACT_EXAMPLE = (
-    "В найденных документах нет готового примера конфигурации или кода именно "
-    "для указанного сервиса. Я не буду подставлять пример из другого продукта "
+    "В найденных документах нет готового примера именно для указанного "
+    "инструмента или сервиса. Я не буду объединять примеры разных продуктов "
     "или придумывать недостающие значения."
 )
 
@@ -1258,6 +1258,8 @@ async def _build_auto(
         # one source block verbatim, or fail closed when retrieval found only
         # prose/field descriptions. `blocks` and `sources` share their order.
         for block, source in zip(blocks, sources):
+            if not rag_pipeline.source_matches_example_subject(answer_query, source):
+                continue
             example = rag_pipeline.first_fenced_example(block)
             if example:
                 cited = dict(source)
