@@ -289,34 +289,37 @@ async def _enrich_source_urls(
 ) -> None:
     """Attach durable Confluence links to RAG sources in place.
 
-    The sync manifest is the cheap first choice, but it can disappear when an
-    OpenShift pod backed by ``emptyDir`` is replaced. For sources absent from
-    that manifest, read ``source_url`` from the document frontmatter through
-    CogniVault. Lookups run in parallel and never make an answer fail.
+    Document frontmatter is authoritative because it travels with the exact
+    indexed page. The UI sync manifest is only a fallback: it can be stale or
+    rebuilt independently and must not override a page's own ``source_url``.
+    Lookups run in parallel and never make an answer fail.
     """
     unresolved: list[dict[str, Any]] = []
     for source in sources:
         path = str(source.get("path") or "")
-        url = _safe_page_url(source.get("url")) or _safe_page_url(
-            manifest_urls.get(path)
-        )
+        url = _safe_page_url(source.get("url"))
         if url:
             source["url"] = url
         elif path:
             unresolved.append(source)
 
     async def from_frontmatter(source: dict[str, Any]) -> None:
+        path = str(source["path"])
         try:
-            meta = await cognivault.metadata(str(source["path"]), cv=cv)
+            meta = await cognivault.metadata(path, cv=cv)
             url = _safe_page_url(meta.get("source_url"))
             if url:
                 source["url"] = url
+                return
         except Exception:  # noqa: BLE001 — source links are best-effort
             log.debug(
                 "не удалось получить source_url для %s",
                 source.get("path"),
                 exc_info=True,
             )
+        fallback = _safe_page_url(manifest_urls.get(path))
+        if fallback:
+            source["url"] = fallback
 
     if unresolved:
         await asyncio.gather(*(from_frontmatter(source) for source in unresolved))
@@ -617,6 +620,9 @@ async def chat(request: Request) -> Any:
                     candidates = getattr(ctx, "candidates", None)
                     grades = getattr(ctx, "grades", None)
                     answer_override = getattr(ctx, "answer_override", None)
+                    answer_override_keep_sources = bool(
+                        getattr(ctx, "answer_override_keep_sources", False)
+                    )
                     scope = getattr(ctx, "scope", None)
                     hedge = getattr(ctx, "hedge", None)
                     head_block_kind = getattr(ctx, "head_block_kind", None)
@@ -629,8 +635,11 @@ async def chat(request: Request) -> Any:
                         # в этой ветке не вызывается вообще. Кадры те же, что в
                         # обычном ходе: meta → sources (пустой) → token → done.
                         rag_used = True
-                        sources = []
-                        context_chars = 0
+                        if not answer_override_keep_sources:
+                            sources = []
+                            context_chars = 0
+                        elif sources:
+                            await _enrich_source_urls(sources, url_index, cv)
                         full_text = answer_override
                         finish_reason = _NO_CONTEXT_FINISH_REASON
                         log.info(
@@ -638,7 +647,10 @@ async def chat(request: Request) -> Any:
                             chat_id,
                             intent,
                         )
-                        yield format_sse("sources", {"sources": [], "context_chars": 0})
+                        yield format_sse(
+                            "sources",
+                            {"sources": sources, "context_chars": context_chars},
+                        )
                         yield format_sse("token", {"text": full_text})
                         yield format_sse(
                             "done", {"chat_id": chat_id, "finish_reason": finish_reason}

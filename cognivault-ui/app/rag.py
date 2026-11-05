@@ -358,6 +358,8 @@ class RagContext:
     * ``grades`` — grader output (``id``, ``path``, ``chunk_index``, ``score``),
       ``None`` when grading was skipped;
     * ``answer_override`` — ready-made answer; the route must skip generation;
+    * ``answer_override_keep_sources`` — the ready-made answer quotes retrieved
+      evidence and therefore keeps its source chip (ordinary refusals do not);
     * ``scope`` — ``document`` / ``corpus`` from the condense step (see
       :mod:`app.corpus_scope`); ``document`` whenever the model did not say;
     * ``hedge`` — the evidence-concentration caveat, appended to the generated
@@ -388,6 +390,7 @@ class RagContext:
     candidates: list[dict[str, Any]] | None = None
     grades: list[dict[str, Any]] | None = None
     answer_override: str | None = None
+    answer_override_keep_sources: bool = False
     scope: str = corpus_scope.DEFAULT_SCOPE
     hedge: str | None = None
     head_block_kind: str | None = None
@@ -1245,6 +1248,41 @@ async def _build_auto(
             standalone_question=rq,
             candidates=candidates,
             grades=grades_meta,
+            scope=scope,
+            hidden_calls=hidden,
+        )
+
+    if exact_example:
+        # Do not ask the answer model to reproduce or "improve" configuration:
+        # that is precisely where plausible invented fields appeared. Return
+        # one source block verbatim, or fail closed when retrieval found only
+        # prose/field descriptions. `blocks` and `sources` share their order.
+        for block, source in zip(blocks, sources):
+            example = rag_pipeline.first_fenced_example(block)
+            if example:
+                cited = dict(source)
+                cited["n"] = 1
+                return RagContext(
+                    sources=[cited],
+                    context_chars=len(block),
+                    intent=intent,
+                    standalone_question=rq,
+                    candidates=candidates,
+                    grades=grades_meta,
+                    answer_override=(
+                        "В документации найден готовый пример:\n\n"
+                        f"{example}\n\n[Источник 1]"
+                    ),
+                    answer_override_keep_sources=True,
+                    scope=scope,
+                    hidden_calls=hidden,
+                )
+        return RagContext(
+            intent=intent,
+            standalone_question=rq,
+            candidates=candidates,
+            grades=grades_meta,
+            answer_override=_NO_EXACT_EXAMPLE,
             scope=scope,
             hidden_calls=hidden,
         )

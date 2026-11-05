@@ -150,6 +150,10 @@ def test_exact_example_selection_keeps_only_confirmed_evidence():
         ("Как выглядит JSON для Fincert?", True),
         ("Какие параметры конфигурации есть у Fincert?", False),
         ("Приведи пример использования Fincert", False),
+        (
+            "Какие два файла нужно создать в папке генератора JSON-сообщений?",
+            False,
+        ),
     ],
 )
 def test_detects_exact_technical_example_requests(question, expected):
@@ -1214,6 +1218,43 @@ def test_condense_cannot_drop_the_exact_example_requirement(monkeypatch):
     grader_prompt = next(prompt for prompt in prompts if not _is_condense(prompt))
     assert "Требование исходного вопроса: а покажи пример конфигурации" in grader_prompt
     assert "ОСОБЫЙ РЕЖИМ" in grader_prompt
+
+
+def test_exact_example_is_returned_verbatim_without_answer_generation(monkeypatch):
+    example = "```yaml\nservice: fincert\nmode: strict\n```"
+    _install_retrieval(monkeypatch, [_frag(1, text=f"Документация\n\n{example}")])
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {"intent": "kb_question", "standalone_question": None}
+        if _is_condense(prompt)
+        else {"grades": [{"id": 1, "score": 5}]},
+    )
+
+    ctx = _build("Покажи пример YAML-конфигурации Fincert", _history())
+
+    assert ctx.answer_override == (
+        f"В документации найден готовый пример:\n\n{example}\n\n[Источник 1]"
+    )
+    assert ctx.answer_override_keep_sources is True
+    assert len(ctx.sources) == 1 and ctx.sources[0]["n"] == 1
+
+
+def test_exact_example_refuses_even_high_grade_prose_without_code(monkeypatch):
+    _install_retrieval(
+        monkeypatch,
+        [_frag(1, text="Параметры конфигурации: адрес, порт и таймаут.")],
+    )
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {"intent": "kb_question", "standalone_question": None}
+        if _is_condense(prompt)
+        else {"grades": [{"id": 1, "score": 5}]},
+    )
+
+    ctx = _build("Приведи пример конфигурации Fincert", _history())
+
+    assert ctx.answer_override == rag._NO_EXACT_EXAMPLE
+    assert ctx.sources == []
 
 
 def test_partial_grader_failure_still_answers(monkeypatch):

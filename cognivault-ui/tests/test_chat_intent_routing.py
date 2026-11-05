@@ -263,6 +263,34 @@ def test_answer_override_skips_gigachat(tmp_path, monkeypatch):
     assert [c["kind"] for c in calls] == ["rag"], "stream_chat не должен вызываться"
 
 
+def test_grounded_answer_override_keeps_its_only_source(tmp_path, monkeypatch):
+    paths = _paths(tmp_path)
+    answer = "Готовый пример:\n\n```yaml\na: b\n```\n\n[Источник 1]"
+    ctx = _ctx(
+        intent="kb_question",
+        answer_override=answer,
+        answer_override_keep_sources=True,
+        sources=[
+            {
+                "n": 1,
+                "title": "Fincert",
+                "path": "Confluence/Fincert.md",
+                "url": "https://confluence.example/pages/77",
+            }
+        ],
+        context_chars=42,
+    )
+    calls = _install(monkeypatch, paths, ctx)
+
+    with TestClient(create_app()) as client:
+        resp = _post(client, [{"role": "user", "content": "покажи конфиг"}])
+
+    events = dict(_parse_sse(resp.text))
+    assert events["sources"]["sources"] == ctx.sources
+    assert events["token"]["text"] == answer
+    assert [call["kind"] for call in calls] == ["rag"]
+
+
 def test_answer_override_persists_like_a_normal_answer(tmp_path, monkeypatch):
     """В истории и в логе отказ выглядит обычным RAG-ответом без источников."""
     paths = _paths(tmp_path)

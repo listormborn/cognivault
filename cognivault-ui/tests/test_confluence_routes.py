@@ -437,3 +437,30 @@ def test_source_url_enrichment_rejects_unsafe_frontmatter(monkeypatch):
     asyncio.run(chat_routes._enrich_source_urls([source], {}, None))
 
     assert "url" not in source
+
+
+def test_source_url_enrichment_prefers_document_metadata_over_stale_manifest(
+    monkeypatch,
+):
+    source = {"n": 1, "path": "Confluence/Fincert.md"}
+
+    async def fake_metadata(path, cv=None):
+        assert path == "Confluence/Fincert.md"
+        return {
+            "source_url": "https://confluence.example/pages/viewpage.action?pageId=correct"
+        }
+
+    monkeypatch.setattr(chat_routes.cognivault, "metadata", fake_metadata)
+    asyncio.run(
+        chat_routes._enrich_source_urls(
+            [source],
+            {
+                "Confluence/Fincert.md": (
+                    "https://confluence.example/pages/viewpage.action?pageId=stale"
+                )
+            },
+            None,
+        )
+    )
+
+    assert source["url"].endswith("pageId=correct")

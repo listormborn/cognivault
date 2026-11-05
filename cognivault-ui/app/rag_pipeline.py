@@ -147,14 +147,22 @@ _EXAMPLE_REQUEST = re.compile(
     r"\b(?:пример\w*|образец\w*|шаблон\w*|сэмпл\w*)\b", re.IGNORECASE
 )
 _ARTIFACT_CREATION_REQUEST = re.compile(
-    r"\b(?:привед\w*|покаж\w*|дай|дайте|напиш\w*|состав\w*|"
-    r"сгенерир\w*|созда\w*)\b|\bкак\s+выглядит\b",
+    r"(?:\b(?:привед\w*|покаж\w*|дай|дайте|напиш\w*|состав\w*|"
+    r"сгенерир\w*|созда\w*)\b(?:\s+\w+){0,2}\s+"
+    r"\b(?:конфигурац\w*|конфиг\w*|код\w*|yaml|yml|json|sql|"
+    r"команд\w*|скрипт\w*|манифест\w*)\b)"
+    r"|(?:\bкак\s+выглядит\b(?:\s+\w+){0,2}\s+"
+    r"\b(?:конфигурац\w*|конфиг\w*|код\w*|yaml|yml|json|sql|"
+    r"команд\w*|скрипт\w*|манифест\w*)\b)",
     re.IGNORECASE,
 )
 _TECHNICAL_ARTIFACT = re.compile(
     r"\b(?:конфигурац\w*|конфиг\w*|код\w*|yaml|yml|json|sql|"
     r"команд\w*|скрипт\w*|манифест\w*)\b",
     re.IGNORECASE,
+)
+_FENCED_EXAMPLE = re.compile(
+    r"(?ms)^```[^\n]*\n.*?^```[ \t]*$"
 )
 
 _ROLE_LABELS = {"user": "Пользователь", "assistant": "Ассистент"}
@@ -274,10 +282,21 @@ def _grade_prompt(question: str, fragments: list[dict[str, Any]]) -> str:
 def requires_exact_example(question: str) -> bool:
     """Return whether the question asks for a ready technical example."""
     text = str(question or "")
-    requests_artifact = _EXAMPLE_REQUEST.search(text) or _ARTIFACT_CREATION_REQUEST.search(
+    example_request = _EXAMPLE_REQUEST.search(text) and _TECHNICAL_ARTIFACT.search(
         text
     )
-    return bool(requests_artifact and _TECHNICAL_ARTIFACT.search(text))
+    return bool(example_request or _ARTIFACT_CREATION_REQUEST.search(text))
+
+
+def first_fenced_example(text: str) -> str | None:
+    """Return the first verbatim Markdown code block, or ``None``.
+
+    Confluence code/noformat macros are converted to fenced Markdown. Requiring
+    that concrete representation is intentionally strict: prose about fields
+    is not a ready example and must never be expanded into one by the model.
+    """
+    match = _FENCED_EXAMPLE.search(str(text or ""))
+    return match.group(0).strip() if match else None
 
 
 async def _call(
