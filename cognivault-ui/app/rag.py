@@ -995,6 +995,7 @@ async def _build_auto(
     rq = condensed.question
     scope = condensed.scope
     shape = condensed.shape
+    context_subject = condensed.subject
     if intent == rag_pipeline.CONTEXT_CLARIFICATION_INTENT:
         return RagContext(
             intent=intent,
@@ -1176,6 +1177,28 @@ async def _build_auto(
             scope=scope,
             hidden_calls=hidden,
         )
+
+    # A resolved active topic is a hard retrieval boundary, not just a hint to
+    # the grader. Generic terms such as «конфигурация» otherwise pull equally
+    # plausible pages for several products and produce a combined answer.
+    if context_subject and scope == corpus_scope.DEFAULT_SCOPE:
+        fragments = [
+            fragment
+            for fragment in fragments
+            if rag_pipeline.source_matches_context_subject(
+                context_subject, fragment
+            )
+        ]
+        if not fragments:
+            return RagContext(
+                intent=intent,
+                standalone_question=rq,
+                candidates=candidates,
+                grades=grades_meta,
+                answer_override=_NO_ANSWER,
+                scope=scope,
+                hidden_calls=hidden,
+            )
 
     # Even a non-technical follow-up («есть ли примеры?») stays within the one
     # product restored by condense.  Relevance grading alone is not enough here:

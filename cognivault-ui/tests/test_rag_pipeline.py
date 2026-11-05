@@ -361,6 +361,7 @@ def test_condense_rewrites_question(monkeypatch):
         'Ответ строго в JSON: {"intent": "...", "standalone_question": "..." | null,'
         ' "uses_history": true | false,'
         ' "clarification_question": "..." | null,'
+        ' "context_subject": "..." | null,'
         ' "scope": "document" | "corpus",'
         ' "answer_shape": "fact" | "list" | "procedure"}'
     ) in calls[0]
@@ -454,6 +455,58 @@ def test_answer_to_context_clarification_restores_original_question(monkeypatch)
 
     assert result.intent == "kb_question"
     assert result.question == "Как настроить Fincert Exporter?"
+
+
+def test_condense_expands_partial_active_topic_name(monkeypatch):
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {
+            "intent": "kb_question",
+            "standalone_question": (
+                "Нужно ли заполнять конфигурацию для Мониторинга моделей?"
+            ),
+            "uses_history": True,
+            "context_subject": "Мониторинг моделей",
+            "scope": "document",
+        },
+    )
+    history = [
+        {"role": "user", "content": "Что такое Мониторинг моделей?"},
+        {
+            "role": "assistant",
+            "content": "Мониторинг моделей отслеживает качество моделей.",
+        },
+    ]
+
+    result = asyncio.run(
+        rag_pipeline.condense(
+            "Нужно ли заполнять конфигурацию для мониторинга?", history, {}, {}
+        )
+    )
+
+    assert result.question == (
+        "Нужно ли заполнять конфигурацию для Мониторинга моделей?"
+    )
+    assert result.subject == "Мониторинг моделей"
+
+
+def test_context_subject_matching_supports_morphology_and_short_acronyms():
+    monitoring_source = {
+        "path": "Продукты/Мониторинг моделей/Конфигурация.md",
+        "title": "Конфигурация Мониторинга моделей",
+    }
+    assert rag_pipeline.text_mentions_context_subject(
+        "конфигурация для мониторинга", "Мониторинг моделей"
+    )
+    assert rag_pipeline.source_matches_context_subject(
+        "Мониторинг моделей", monitoring_source
+    )
+    assert rag_pipeline.source_matches_context_subject(
+        "АРМ DS", {"path": "Продукты/АРМ DS/Инструкция.md"}
+    )
+    assert not rag_pipeline.source_matches_context_subject(
+        "Мониторинг моделей", {"path": "Продукты/YAFCA/Конфигурация.md"}
+    )
 
 
 def test_condense_history_capped_at_six_turns(monkeypatch):
@@ -573,7 +626,7 @@ def test_first_turn_condense_is_off_by_default(monkeypatch):
     result = asyncio.run(rag_pipeline.condense("первый вопрос", None, {}, {}))
 
     assert calls == []
-    assert result == ("kb_question", "первый вопрос", "document", "fact")
+    assert result == ("kb_question", "первый вопрос", "document", "fact", None)
 
 
 def test_first_turn_condense_takes_the_scope_and_nothing_else(monkeypatch):
@@ -600,7 +653,9 @@ def test_first_turn_condense_takes_the_scope_and_nothing_else(monkeypatch):
 
     assert len(calls) == 1
     assert "первая реплика" in calls[0]
-    assert result == ("kb_question", "расскажи про Fincert", "corpus", "fact")
+    assert result == (
+        "kb_question", "расскажи про Fincert", "corpus", "fact", None
+    )
 
 
 def test_first_turn_condense_failure_changes_nothing(monkeypatch):
@@ -613,7 +668,7 @@ def test_first_turn_condense_failure_changes_nothing(monkeypatch):
         rag_pipeline.condense("вопрос", None, {"condense_first_turn": True}, {})
     )
 
-    assert result == ("kb_question", "вопрос", "document", "fact")
+    assert result == ("kb_question", "вопрос", "document", "fact", None)
 
 
 def test_condense_smalltalk_keeps_raw_question(monkeypatch):
@@ -1199,6 +1254,57 @@ def test_failed_context_resolution_returns_question_without_retrieval(monkeypatc
     assert ctx.answer_override == rag_pipeline.CONTEXT_CLARIFICATION_ANSWER
     assert ctx.sources == []
     assert seen == [], "сбой разрешения контекста не должен включать широкий поиск"
+
+
+def test_active_topic_filters_other_tools_from_configuration_answer(monkeypatch):
+    monitoring = _frag(1, text="Для мониторинга моделей конфигурация обязательна.")
+    monitoring.update(
+        path="Продукты/Мониторинг моделей/Конфигурация.md",
+        title="Конфигурация Мониторинга моделей",
+    )
+    yafca = _frag(2, text="Для YAFCA заполните конфигурацию потоков.")
+    yafca.update(path="Продукты/YAFCA/Конфигурация.md", title="YAFCA")
+    fincert = _frag(3, text="Для Fincert заполните конфигурацию экспортера.")
+    fincert.update(path="Продукты/Fincert/Конфигурация.md", title="Fincert")
+    _install_retrieval(monkeypatch, [monitoring, yafca, fincert])
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {
+            "intent": "kb_question",
+            "standalone_question": (
+                "Нужно ли заполнять конфигурацию для Мониторинга моделей?"
+            ),
+            "uses_history": True,
+            "context_subject": "Мониторинг моделей",
+            "scope": "document",
+        }
+        if _is_condense(prompt)
+        else {
+            "grades": [
+                {"id": 1, "score": 5},
+                {"id": 2, "score": 5},
+                {"id": 3, "score": 5},
+            ]
+        },
+    )
+    history = [
+        {"role": "user", "content": "Что такое Мониторинг моделей?"},
+        {
+            "role": "assistant",
+            "content": "Мониторинг моделей отслеживает качество моделей.",
+        },
+    ]
+
+    ctx = _build(
+        "Нужно ли заполнять конфигурацию для мониторинга?", history
+    )
+
+    assert [source["path"] for source in ctx.sources] == [
+        "Продукты/Мониторинг моделей/Конфигурация.md"
+    ]
+    assert "Мониторинга моделей" in ctx.user_message["content"]
+    assert "YAFCA" not in ctx.user_message["content"]
+    assert "Fincert" not in ctx.user_message["content"]
 
 
 # --------------------------------------------------------------------------- #

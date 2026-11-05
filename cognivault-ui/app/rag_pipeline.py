@@ -238,6 +238,11 @@ _CONDENSE_TASKS = """
 - Если последняя реплика — ответ на твой предыдущий уточняющий вопрос (например,
   только «Fincert»), восстанови с выбранным объектом ИСХОДНЫЙ вопрос пользователя,
   выбери "kb_question" и верни полный запрос в standalone_question.
+- Для вопроса об одном конкретном объекте запиши его ПОЛНОЕ каноническое название
+  в context_subject. Сокращённое упоминание активной темы («мониторинг» после
+  «Мониторинг моделей») считай продолжением: восстанови полное название в
+  standalone_question, поставь uses_history=true и context_subject="Мониторинг моделей".
+  Для вопроса по всей базе и при неоднозначности context_subject=null.
 - Поле uses_history=true ставь только когда без истории нельзя понять местоимение,
   пропущенный объект или явную отсылку («это», «его», «а как настроить?»,
   «предыдущий ответ»). Для самостоятельного нового вопроса — false.
@@ -257,7 +262,7 @@ _CONDENSE_TASKS = """
   "fact" — всё остальное (одно значение, определение, сравнение, да/нет).
   При сомнении выбирай "fact".
 
-Ответ строго в JSON: {"intent": "...", "standalone_question": "..." | null, "uses_history": true | false, "clarification_question": "..." | null, "scope": "document" | "corpus", "answer_shape": "fact" | "list" | "procedure"}
+Ответ строго в JSON: {"intent": "...", "standalone_question": "..." | null, "uses_history": true | false, "clarification_question": "..." | null, "context_subject": "..." | null, "scope": "document" | "corpus", "answer_shape": "fact" | "list" | "procedure"}
 Отвечай только JSON, без рассуждений и пояснений до или после него."""
 
 _GRADE_SCALE = """
@@ -685,6 +690,7 @@ class Condensed(NamedTuple):
     question: str
     scope: str = corpus_scope.DEFAULT_SCOPE
     shape: str = DEFAULT_SHAPE
+    subject: str | None = None
 
 
 # Форма ответа, распознанная БЕЗ вызова модели.
@@ -828,6 +834,74 @@ def _clarification_question(value: Any) -> str:
     return text
 
 
+_CONTEXT_GENERIC_TOKENS = {
+    "вопрос", "ответ", "продукт", "сервис", "инструмент", "документ",
+    "конфигурация", "конфигурации", "настройка", "настройки",
+}
+
+
+def _context_subject(value: Any) -> str | None:
+    """Canonical topic name declared by condense, bounded for later filtering."""
+    text = " ".join(str(value or "").strip().split())
+    if not text or len(text) > 160 or len(text.split()) > 12:
+        return None
+    return text
+
+
+def _context_tokens(value: str) -> list[str]:
+    tokens: list[str] = []
+    for token in _SUBJECT_TOKEN.findall(value):
+        folded = token.casefold()
+        # Short uppercase product acronyms (DL, DS, АРМ, FS) are meaningful;
+        # ordinary two-letter words are not.
+        if len(token) < 4 and not (len(token) >= 2 and token.isupper()):
+            continue
+        if folded not in _CONTEXT_GENERIC_TOKENS:
+            tokens.append(folded)
+    return tokens
+
+
+def _same_context_token(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    common = 0
+    for a, b in zip(left, right):
+        if a != b:
+            break
+        common += 1
+    return common >= 5
+
+
+def text_mentions_context_subject(text: str, subject: str) -> bool:
+    """Whether a shortened subject in ``text`` overlaps the canonical name."""
+    text_tokens = _context_tokens(str(text or ""))
+    subject_tokens = _context_tokens(str(subject or ""))
+    return bool(
+        text_tokens
+        and subject_tokens
+        and any(
+            _same_context_token(left, right)
+            for left in text_tokens
+            for right in subject_tokens
+        )
+    )
+
+
+def source_matches_context_subject(subject: str, source: dict[str, Any]) -> bool:
+    """Require every significant canonical-subject token in source identity."""
+    wanted = _context_tokens(str(subject or ""))
+    if not wanted:
+        return False
+    identity = " ".join(
+        str(source.get(key) or "") for key in ("title", "path", "section_path")
+    )
+    available = _context_tokens(identity)
+    return all(
+        any(_same_context_token(term, token) for token in available)
+        for term in wanted
+    )
+
+
 def _parse_condense(
     data: dict[str, Any],
     question: str,
@@ -846,6 +920,7 @@ def _parse_condense(
     """
     scope = corpus_scope.parse_scope(data.get("scope"))
     shape = _parse_shape(data.get("answer_shape"))
+    subject = _context_subject(data.get("context_subject"))
     intent = str(data.get("intent", "") or "").strip().strip('"').lower()
     if intent not in _INTENTS:
         log.warning("condense: неизвестный intent %r — фолбэк на kb_question", intent)
@@ -889,7 +964,7 @@ def _parse_condense(
         and raw.strip()
         and raw.strip() != question.strip()
     ):
-        return Condensed(intent, raw.strip(), scope, shape)
+        return Condensed(intent, raw.strip(), scope, shape, subject)
     if intent == "kb_question" and dependent:
         return Condensed(
             CONTEXT_CLARIFICATION_INTENT,
@@ -897,7 +972,20 @@ def _parse_condense(
             scope,
             shape,
         )
-    return Condensed(intent, question, scope, shape)
+    partial_subject = bool(
+        model_uses_history
+        and subject
+        and text_mentions_context_subject(question, subject)
+    )
+    if (
+        intent == "kb_question"
+        and partial_subject
+        and isinstance(raw, str)
+        and raw.strip()
+        and raw.strip() != question.strip()
+    ):
+        return Condensed(intent, raw.strip(), scope, shape, subject)
+    return Condensed(intent, question, scope, shape, subject)
 
 
 async def condense(
@@ -1031,7 +1119,13 @@ async def condense_with_report(
     )
     if first_turn:
         if parsed.intent != CONTEXT_CLARIFICATION_INTENT:
-            parsed = Condensed(_DEFAULT_INTENT, question, parsed.scope, parsed.shape)
+            parsed = Condensed(
+                _DEFAULT_INTENT,
+                question,
+                parsed.scope,
+                parsed.shape,
+                parsed.subject,
+            )
     return parsed, _outcome("ok", trace, started)
 
 
