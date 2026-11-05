@@ -991,16 +991,18 @@ async def _build_auto(
     )
     hidden: dict[str, Any] = {"condense": condense_report, "grader": None}
     intent, rq, scope, shape = condensed
+    raw_example_request = rag_pipeline.requests_example(query)
+    example_request = raw_example_request or rag_pipeline.requests_example(rq)
     raw_exact_example = rag_pipeline.requires_exact_example(query)
     exact_example = raw_exact_example or rag_pipeline.requires_exact_example(rq)
     # A condense model must not silently drop the user's request for a ready
     # example. Keep the resolved standalone subject and restore the original
     # format constraint for grading and final generation if it did.
     answer_query = rq
-    if raw_exact_example and not rag_pipeline.requires_exact_example(rq):
+    if raw_example_request and not rag_pipeline.requests_example(rq):
         answer_query = f"{rq}\nТребование исходного вопроса: {query}"
 
-    if exact_example and not rag_pipeline.example_subject_terms(rq):
+    if example_request and not rag_pipeline.example_subject_terms(rq):
         return RagContext(
             intent=intent,
             standalone_question=rq,
@@ -1158,6 +1160,26 @@ async def _build_auto(
             scope=scope,
             hidden_calls=hidden,
         )
+
+    # Even a non-technical follow-up («есть ли примеры?») stays within the one
+    # product restored by condense.  Relevance grading alone is not enough here:
+    # generic words such as «пример» rank example pages from unrelated tools.
+    if example_request:
+        fragments = [
+            fragment
+            for fragment in fragments
+            if rag_pipeline.source_matches_example_subject(answer_query, fragment)
+        ]
+        if not fragments:
+            return RagContext(
+                intent=intent,
+                standalone_question=rq,
+                candidates=candidates,
+                grades=grades_meta,
+                answer_override=_NO_EXACT_EXAMPLE if exact_example else _NO_ANSWER,
+                scope=scope,
+                hidden_calls=hidden,
+            )
 
     # 2-4. Group by file, rank files by their best hit: the grader's verdict
     # first (it re-ranks), the raw cosine score only as a tie-break / when the

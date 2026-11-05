@@ -170,7 +170,7 @@ _EXAMPLE_GENERIC_PREFIXES = (
     "конфиг", "код", "yaml", "yml", "json", "sql", "команд", "скрипт",
     "манифест", "покаж", "прив", "напиш", "состав", "созда", "сгенер",
     "готов", "документ", "требован", "исходн", "вопрос", "продукт", "сервис",
-    "инструмент", "структур", "формат",
+    "инструмент", "структур", "формат", "использован", "работ", "налич",
 )
 _EXAMPLE_STOPWORDS = {
     "а", "без", "в", "во", "вы", "где", "дайте", "дай", "для", "его",
@@ -178,7 +178,8 @@ _EXAMPLE_STOPWORDS = {
     "на", "нужен", "нужна", "нужно", "о", "по", "покажи", "при", "с",
     "со", "такой", "такую", "то", "у", "что", "это", "этого", "этой",
     "можешь", "можете", "можно", "пожалуйста", "ещё", "еще", "теперь",
-    "также", "здесь", "сейчас",
+    "также", "здесь", "сейчас", "есть", "ли", "имеется", "имеются",
+    "бывает", "бывают",
 }
 
 _ROLE_LABELS = {"user": "Пользователь", "assistant": "Ассистент"}
@@ -306,6 +307,17 @@ def requires_exact_example(question: str) -> bool:
         text
     )
     return bool(example_request or _ARTIFACT_CREATION_REQUEST.search(text))
+
+
+def requests_example(question: str) -> bool:
+    """Return whether the user asks about examples in any form.
+
+    This is deliberately broader than :func:`requires_exact_example`.  A short
+    follow-up such as «есть ли примеры?» does not name a technical artefact, but
+    it still has an omitted product and must be resolved from dialogue history
+    rather than searched across the whole corpus.
+    """
+    return bool(_EXAMPLE_REQUEST.search(str(question or "")))
 
 
 def first_fenced_example(text: str) -> str | None:
@@ -691,7 +703,7 @@ def _needs_history_resolution(question: str) -> bool:
     # without a pronoun: the omitted object is the product discussed one turn
     # earlier. Let condense restore it; if it cannot, the RAG builder refuses
     # before retrieval instead of searching the whole corpus.
-    if requires_exact_example(text) and not example_subject_terms(text):
+    if requests_example(text) and not example_subject_terms(text):
         return True
     words = text.rstrip("?!.").split()
     # Elliptic follow-ups: «а как настроить?», «а где посмотреть?». A longer

@@ -388,6 +388,27 @@ def test_condense_resolves_example_followup_without_a_pronoun(monkeypatch):
     assert result.question == "Приведи пример сообщения Fincert Exporter"
 
 
+def test_condense_resolves_short_example_existence_followup(monkeypatch):
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {
+            "intent": "kb_question",
+            "standalone_question": "Есть ли примеры для Fincert Exporter?",
+            "uses_history": True,
+        },
+    )
+    history = [
+        {"role": "user", "content": "Как работает Fincert Exporter?"},
+        {"role": "assistant", "content": "Он формирует сообщения для Fincert."},
+    ]
+
+    result = asyncio.run(
+        rag_pipeline.condense("Есть ли примеры?", history, {}, {})
+    )
+
+    assert result.question == "Есть ли примеры для Fincert Exporter?"
+
+
 def test_condense_history_capped_at_six_turns(monkeypatch):
     calls = _install_complete_json(monkeypatch, lambda p: {"intent": "kb_question"})
     messages = [
@@ -1362,6 +1383,57 @@ def test_message_example_without_a_named_tool_refuses_to_guess(monkeypatch):
     assert ctx.answer_override == rag._NO_EXAMPLE_SUBJECT
     assert ctx.sources == []
     assert seen == [], "неразрешённое продолжение не должно искать по всей базе"
+
+
+def test_short_example_followup_without_resolved_tool_refuses_before_search(monkeypatch):
+    hit = _frag(1, text="```json\n{\"tool\": \"yafca\"}\n```")
+    hit.update(path="YAFCA/Messages.md", title="YAFCA Messages")
+    seen = _install_retrieval(monkeypatch, [hit])
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {
+            "intent": "kb_question",
+            "standalone_question": "Есть ли примеры?",
+            "uses_history": True,
+        },
+    )
+
+    ctx = _build("Есть ли примеры?", _history())
+
+    assert ctx.answer_override == rag._NO_EXAMPLE_SUBJECT
+    assert ctx.sources == []
+    assert seen == [], "неразрешённое продолжение не должно искать по всей базе"
+
+
+def test_short_example_followup_keeps_only_restored_tool_sources(monkeypatch):
+    yafca = _frag(1, text="Пример сообщения YAFCA")
+    yafca.update(path="YAFCA/Messages.md", title="YAFCA Messages")
+    fincert = _frag(2, text="Пример сообщения Fincert Exporter")
+    fincert.update(path="Fincert/Exporter/Messages.md", title="Fincert Exporter")
+    _install_retrieval(monkeypatch, [yafca, fincert])
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {
+            "intent": "kb_question",
+            "standalone_question": "Есть ли примеры для Fincert Exporter?",
+            "uses_history": True,
+        }
+        if _is_condense(prompt)
+        else {"grades": [{"id": 1, "score": 5}, {"id": 2, "score": 5}]},
+    )
+    history = [
+        {"role": "user", "content": "Как работает Fincert Exporter?"},
+        {"role": "assistant", "content": "Он формирует сообщения для Fincert."},
+    ]
+
+    ctx = _build("Есть ли примеры?", history)
+
+    assert ctx.answer_override is None
+    assert [source["path"] for source in ctx.sources] == [
+        "Fincert/Exporter/Messages.md"
+    ]
+    assert "Fincert Exporter" in ctx.user_message["content"]
+    assert "YAFCA" not in ctx.user_message["content"]
 
 
 def test_resolved_message_followup_searches_only_with_restored_tool(monkeypatch):
