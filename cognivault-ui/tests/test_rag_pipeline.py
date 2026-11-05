@@ -114,6 +114,48 @@ def test_select_refuses_when_nothing_reaches_three():
     assert (kept, refused) == ([], True)
 
 
+def test_exact_example_selection_has_no_topical_or_ungraded_fallback():
+    cands = [_frag(i) for i in range(1, 5)]
+
+    kept, refused = rag_pipeline.select(
+        cands,
+        [3, 2, None, 1],
+        {"grader_threshold": 4, "grader_keep_top": 2},
+        strict=True,
+    )
+
+    assert (kept, refused) == ([], True)
+
+
+def test_exact_example_selection_keeps_only_confirmed_evidence():
+    cands = [_frag(i) for i in range(1, 5)]
+
+    kept, refused = rag_pipeline.select(
+        cands,
+        [2, 5, None, 4],
+        {"grader_threshold": 4, "grader_keep_top": 2},
+        strict=True,
+    )
+
+    assert refused is False
+    assert [item["path"] for item in kept] == ["doc2.md", "doc4.md"]
+
+
+@pytest.mark.parametrize(
+    "question, expected",
+    [
+        ("Приведи пример конфигурации сервиса Fincert", True),
+        ("Покажи пример YAML для Fincert", True),
+        ("Напиши конфиг для Fincert", True),
+        ("Как выглядит JSON для Fincert?", True),
+        ("Какие параметры конфигурации есть у Fincert?", False),
+        ("Приведи пример использования Fincert", False),
+    ],
+)
+def test_detects_exact_technical_example_requests(question, expected):
+    assert rag_pipeline.requires_exact_example(question) is expected
+
+
 def test_select_insurance_does_not_override_a_total_refusal():
     """`keep_top` НЕ спасает от отказа при дефолтном `grader_keep_top=2`.
 
@@ -1105,6 +1147,73 @@ def test_refusal_when_everything_below_threshold(monkeypatch):
     assert (ctx.system_message, ctx.user_message, ctx.sources) == (None, None, [])
     assert [c["path"] for c in ctx.candidates] == [f"doc{i}.md" for i in range(1, 4)]
     assert [g["score"] for g in ctx.grades] == [1, 1, 1]
+
+
+def test_example_request_refuses_topical_fragments_from_other_services(monkeypatch):
+    hits = [
+        _frag(1, text="Пример YAML-конфигурации совершенно другого сервиса"),
+        _frag(2, text="Описание параметров Fincert без готового примера"),
+    ]
+    _install_retrieval(monkeypatch, hits)
+    prompts = _install_complete_json(
+        monkeypatch,
+        lambda prompt: {
+            "intent": "kb_question",
+            "standalone_question": None,
+        }
+        if _is_condense(prompt)
+        else {"grades": [{"id": 1, "score": 1}, {"id": 2, "score": 2}]},
+    )
+
+    ctx = _build("Приведи пример YAML-конфигурации Fincert", _history())
+
+    assert ctx.answer_override == rag._NO_EXACT_EXAMPLE
+    assert ctx.sources == []
+    grader_prompt = next(prompt for prompt in prompts if not _is_condense(prompt))
+    assert "Пример для другого продукта или сервиса — 1" in grader_prompt
+    assert "Описание параметров без готового примера — не выше 2" in grader_prompt
+
+
+def test_example_request_refuses_when_grader_is_unavailable(monkeypatch):
+    _install_retrieval(monkeypatch, [_frag(1, text="похожий конфиг")])
+
+    async def fake_complete_json(messages, gcfg, **kwargs):
+        prompt = messages[-1]["content"]
+        if _is_condense(prompt):
+            return {"intent": "kb_question", "standalone_question": None}
+        raise RuntimeError("grader unavailable")
+
+    monkeypatch.setattr(
+        rag_pipeline.llm, "complete_json", fake_complete_json, raising=False
+    )
+
+    ctx = _build("Покажи пример конфигурации Fincert", _history())
+
+    assert ctx.answer_override == rag._NO_EXACT_EXAMPLE
+    assert ctx.sources == []
+
+
+def test_condense_cannot_drop_the_exact_example_requirement(monkeypatch):
+    _install_retrieval(monkeypatch, [_frag(1, text="описание настройки Fincert")])
+
+    prompts = _install_complete_json(
+        monkeypatch,
+        lambda prompt: {
+            "intent": "kb_question",
+            "standalone_question": "как настроить Fincert",
+            "uses_history": True,
+        }
+        if _is_condense(prompt)
+        else {"grades": [{"id": 1, "score": 2}]},
+    )
+
+    ctx = _build("а покажи пример конфигурации", _history())
+
+    assert ctx.standalone_question == "как настроить Fincert"
+    assert ctx.answer_override == rag._NO_EXACT_EXAMPLE
+    grader_prompt = next(prompt for prompt in prompts if not _is_condense(prompt))
+    assert "Требование исходного вопроса: а покажи пример конфигурации" in grader_prompt
+    assert "ОСОБЫЙ РЕЖИМ" in grader_prompt
 
 
 def test_partial_grader_failure_still_answers(monkeypatch):

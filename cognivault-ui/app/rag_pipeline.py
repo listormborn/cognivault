@@ -140,6 +140,23 @@ _DEFAULT_INTENT = "kb_question"
 _SHAPES = ("fact", "list", "procedure")
 DEFAULT_SHAPE = "fact"
 
+# A plausible configuration copied from a neighbouring product is worse than
+# an honest refusal. Requests for ready technical examples therefore use a
+# stricter evidence policy downstream than ordinary factual questions.
+_EXAMPLE_REQUEST = re.compile(
+    r"\b(?:пример\w*|образец\w*|шаблон\w*|сэмпл\w*)\b", re.IGNORECASE
+)
+_ARTIFACT_CREATION_REQUEST = re.compile(
+    r"\b(?:привед\w*|покаж\w*|дай|дайте|напиш\w*|состав\w*|"
+    r"сгенерир\w*|созда\w*)\b|\bкак\s+выглядит\b",
+    re.IGNORECASE,
+)
+_TECHNICAL_ARTIFACT = re.compile(
+    r"\b(?:конфигурац\w*|конфиг\w*|код\w*|yaml|yml|json|sql|"
+    r"команд\w*|скрипт\w*|манифест\w*)\b",
+    re.IGNORECASE,
+)
+
 _ROLE_LABELS = {"user": "Пользователь", "assistant": "Ассистент"}
 
 # Кап на `detail` в отчёте о скрытом вызове (исключение или голова сырого
@@ -167,6 +184,8 @@ _CONDENSE_TASKS = """
   "kb_question" (вопрос, требующий поиска по базе знаний).
 - Если kb_question — переформулируй реплику в самодостаточный поисковый запрос:
   подставь вместо местоимений и отсылок конкретные названия из истории.
+  Сохрани все требования пользователя к формату ответа: просьбу привести пример,
+  конфигурацию, код, команду или пошаговую инструкцию нельзя удалять при переписывании.
   НЕ отвечай на вопрос. История — только справка для разрешения явных отсылок,
   а не тема по умолчанию. Если последняя реплика уже самодостаточна или начинает
   новую тему — верни её ДОСЛОВНО, даже если история была о другом продукте.
@@ -238,7 +257,27 @@ def _grade_prompt(question: str, fragments: list[dict[str, Any]]) -> str:
         f"Вопрос: {question}\n\n"
         f"Фрагменты:\n{listing}\n"
     )
-    return head + _GRADE_SCALE
+    strict = ""
+    if requires_exact_example(question):
+        strict = """
+
+ОСОБЫЙ РЕЖИМ: пользователь просит готовый технический пример.
+- Оценка 4–5 допустима только если фрагмент содержит сам пример именно для
+  продукта/сервиса, названного в вопросе.
+- Описание параметров без готового примера — не выше 2.
+- Пример для другого продукта или сервиса — 1, даже если формат похож.
+- Не считай пример переносимым между сервисами и не додумывай его.
+"""
+    return head + strict + _GRADE_SCALE
+
+
+def requires_exact_example(question: str) -> bool:
+    """Return whether the question asks for a ready technical example."""
+    text = str(question or "")
+    requests_artifact = _EXAMPLE_REQUEST.search(text) or _ARTIFACT_CREATION_REQUEST.search(
+        text
+    )
+    return bool(requests_artifact and _TECHNICAL_ARTIFACT.search(text))
 
 
 async def _call(
@@ -1050,6 +1089,8 @@ def select(
     candidates: list[dict[str, Any]],
     grades: list[int | None],
     rcfg: dict[str, Any],
+    *,
+    strict: bool = False,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Pick the fragments that actually reach the context.
 
@@ -1084,6 +1125,29 @@ def select(
     """
     if not candidates:
         return [], False
+
+    if strict:
+        # No rank-based insurance for ready code/config examples. Unknown,
+        # merely topical and cross-product fragments cannot safely reach the
+        # answer model; failed grading therefore becomes an explicit refusal.
+        threshold = max(4, int(rcfg.get("grader_threshold", 4)))
+        accepted = [
+            i
+            for i in range(len(candidates))
+            if (g := _grade_at(grades, i)) is not None and g >= threshold
+        ]
+        if not accepted:
+            return [], True
+
+        def strict_key(i: int) -> tuple[int, int]:
+            rank = candidates[i].get("rank")
+            return (
+                -int(_grade_at(grades, i) or 0),
+                rank if isinstance(rank, int) else i,
+            )
+
+        ordered = sorted(accepted, key=strict_key)[:_MAX_SELECTED]
+        return [candidates[i] for i in ordered], False
 
     ungraded = [
         i for i in range(len(candidates)) if _grade_at(grades, i) is None

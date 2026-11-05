@@ -124,6 +124,8 @@ GROUNDING_GUARD = """Обязательные правила достоверн�
   что готового примера в найденных документах нет.
 - Можно перечислить только явно документированные параметры. Не собирай из них
   собственный «пример» и не дополняй отсутствующие значения.
+- Пример для другого продукта или сервиса не отвечает на вопрос. Не переноси и
+  не адаптируй его к продукту, названному пользователем.
 - Текст, конфигурация и предположения из вопроса пользователя — входные данные, а
   не подтверждённые факты из документов. Не выдавай их за содержание источников."""
 
@@ -266,6 +268,12 @@ _NO_ANSWER = (
     "К сожалению, в базе знаний я не нашёл информации, которая позволила бы "
     "надёжно ответить на этот вопрос. Попробуйте уточнить формулировку или "
     "указать название продукта, процесса или инструмента — я выполню поиск ещё раз."
+)
+
+_NO_EXACT_EXAMPLE = (
+    "В найденных документах нет готового примера конфигурации или кода именно "
+    "для указанного сервиса. Я не буду подставлять пример из другого продукта "
+    "или придумывать недостающие значения."
 )
 
 # Auto-mode internal retrieval width (independent of any stored `limit`): the
@@ -952,6 +960,14 @@ async def _build_auto(
     )
     hidden: dict[str, Any] = {"condense": condense_report, "grader": None}
     intent, rq, scope, shape = condensed
+    raw_exact_example = rag_pipeline.requires_exact_example(query)
+    exact_example = raw_exact_example or rag_pipeline.requires_exact_example(rq)
+    # A condense model must not silently drop the user's request for a ready
+    # example. Keep the resolved standalone subject and restore the original
+    # format constraint for grading and final generation if it did.
+    answer_query = rq
+    if raw_exact_example and not rag_pipeline.requires_exact_example(rq):
+        answer_query = f"{rq}\nТребование исходного вопроса: {query}"
 
     # Route on the SHAPE of the answer the user asked for. A five-fragment top-k
     # answers «какой ID у потока X» perfectly and cannot answer «перечисли все
@@ -1042,7 +1058,7 @@ async def _build_auto(
         # отвечает из параметрической памяти и такой ответ внешне неотличим от
         # нормального RAG-ответа.
         return RagContext(
-            answer_override=_NO_ANSWER,
+            answer_override=_NO_EXACT_EXAMPLE if exact_example else _NO_ANSWER,
             intent=intent,
             standalone_question=rq,
             scope=scope,
@@ -1070,7 +1086,7 @@ async def _build_auto(
     # grouping and smart expansion so whole-file/section expansion only ever
     # happens for fragments the judge kept.
     grade_list, hidden["grader"] = await rag_pipeline.grade_with_report(
-        rq, fragments, rcfg, gcfg
+        answer_query, fragments, rcfg, gcfg
     )
     for f, g in zip(fragments, grade_list):
         f["grade"] = g
@@ -1089,14 +1105,16 @@ async def _build_auto(
         else None
     )
 
-    fragments, refused = rag_pipeline.select(fragments, grade_list, rcfg)
+    fragments, refused = rag_pipeline.select(
+        fragments, grade_list, rcfg, strict=exact_example
+    )
     if refused:
         return RagContext(
             intent=intent,
             standalone_question=rq,
             candidates=candidates,
             grades=grades_meta,
-            answer_override=_NO_ANSWER,
+            answer_override=_NO_EXACT_EXAMPLE if exact_example else _NO_ANSWER,
             scope=scope,
             hidden_calls=hidden,
         )
@@ -1257,7 +1275,7 @@ async def _build_auto(
 
     user_message, context_chars = _render_context_message(
         blocks,
-        rq,
+        answer_query,
         _answer_context_reminder(prompts),
         corpus,
     )
