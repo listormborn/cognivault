@@ -271,6 +271,10 @@ _CONDENSE_TASKS = """
   объект переключает активную тему; самодостаточный вопрос по всей базе её не
   использует. Если непонятно, относится ли реплика к активной теме, запроси
   уточнение вместо выбора наугад.
+- Если объект вложен в более широкий продукт («Автоматическое дообучение» внутри
+  «АРМ DS»), активной темой является самый конкретный объект. В следующем
+  зависимом вопросе не заменяй его родительским продуктом и не ищи по соседним
+  инструментам этого продукта.
 - Поле uses_history=true ставь только когда без истории нельзя понять местоимение,
   пропущенный объект или явную отсылку («это», «его», «а как настроить?»,
   «предыдущий ответ»). Для самостоятельного нового вопроса — false.
@@ -831,6 +835,43 @@ _LOCAL_PRONOUN_ANTECEDENT = re.compile(
     r"\b[a-zа-яё0-9_.-]{3,}\s+(?:и|или)\s+(?:его|её|их)\b",
     re.IGNORECASE,
 )
+_SELF_CONTAINED_DEFINITION = re.compile(
+    r"\bчто\s+так(?:ое|ой|ая|ие)\s+\S+", re.IGNORECASE
+)
+
+# Short procedural questions often omit the object without using a pronoun:
+# «какую конфигурацию нужно заполнить?», «какие параметры обязательны?».  They
+# are just as context-dependent as «как его настроить?».  Keep this list about
+# technical artefacts/actions rather than arbitrary short questions so a new
+# self-contained topic is not pulled into the previous product by accident.
+_IMPLICIT_TARGET_NOUN = re.compile(
+    r"\b(?:конфигурац\w*|конфиг\w*|настройк\w*|параметр\w*|пол(?:е|я|ей)\w*|"
+    r"команд\w*|шаг\w*|значен\w*|раздел\w*|форм\w*)\b",
+    re.IGNORECASE,
+)
+_IMPLICIT_TARGET_ACTION = re.compile(
+    r"\b(?:како\w*|что|где|как|нужн\w*|надо|следует|обязательн\w*|"
+    r"заполн\w*|указ\w*|настро\w*|выполн\w*|использ\w*|выбрат\w*)\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_TARGET_AFTER_PREPOSITION = re.compile(
+    r"\b(?:для|в|во|по|у)\s+(?P<target>[a-zа-яё0-9][a-zа-яё0-9_.-]*)",
+    re.IGNORECASE,
+)
+
+
+def _has_explicit_target(question: str) -> bool:
+    """Whether a short artefact question names its own product/topic."""
+    text = canonicalize_technical_names(question)
+    for match in _EXPLICIT_TARGET_AFTER_PREPOSITION.finditer(text):
+        # «что указать В конфигурации?» still omits the product; the artefact
+        # itself is not a subject. «что указать в мониторинге?» does name one.
+        if not _IMPLICIT_TARGET_NOUN.fullmatch(match.group("target")):
+            return True
+    return any(
+        re.search(rf"(?<![\w]){re.escape(name)}(?![\w])", text, re.IGNORECASE)
+        for name in _CANONICAL_TECHNICAL_NAMES
+    )
 
 
 def _needs_history_resolution(question: str) -> bool:
@@ -839,7 +880,11 @@ def _needs_history_resolution(question: str) -> bool:
         return False
     # «что известно про кластер и его настройку» is self-contained: «его»
     # points to the noun in the SAME sentence, not to dialogue history.
-    if _HISTORY_REFERENCE.search(text) and not _LOCAL_PRONOUN_ANTECEDENT.search(text):
+    if (
+        _HISTORY_REFERENCE.search(text)
+        and not _LOCAL_PRONOUN_ANTECEDENT.search(text)
+        and not _SELF_CONTAINED_DEFINITION.search(text)
+    ):
         return True
     # «Можешь привести пример сообщения?» is semantically dependent even
     # without a pronoun: the omitted object is the product discussed one turn
@@ -848,6 +893,13 @@ def _needs_history_resolution(question: str) -> bool:
     if requests_example(text) and not example_subject_terms(text):
         return True
     words = text.rstrip("?!.").split()
+    if (
+        len(words) <= 8
+        and _IMPLICIT_TARGET_NOUN.search(text)
+        and _IMPLICIT_TARGET_ACTION.search(text)
+        and not _has_explicit_target(text)
+    ):
+        return True
     # Elliptic follow-ups: «а как настроить?», «а где посмотреть?». A longer
     # sentence such as «а как получить доступ к Fincert Bitbucket?» already
     # names its object and must stay independent from the prior dialogue.
@@ -863,6 +915,11 @@ def _needs_history_resolution(question: str) -> bool:
         "какая",
         "какие",
     }
+
+
+def needs_history_resolution(question: str) -> bool:
+    """Public, deterministic signal that a turn omits its dialogue subject."""
+    return _needs_history_resolution(question)
 
 
 def _answers_context_clarification(history: list[dict[str, Any]]) -> bool:
@@ -1123,6 +1180,22 @@ _GENERIC_IDENTITY_NAMES = {
     "документация", "главная", "readme", "index",
 }
 
+_IDENTITY_SUBJECT_PREFIX = re.compile(
+    r"^(?:(?:пользовательская|техническая)\s+инструкция|инструкция|описание|"
+    r"обзор|конфигурация|настройка|документация)\s*[.\-:—]*\s*",
+    re.IGNORECASE,
+)
+
+
+def _identity_subject(value: Any) -> str:
+    """Turn a path/page label into the topic name it documents."""
+    text = " ".join(str(value or "").strip().split())
+    previous = None
+    while text and text != previous:
+        previous = text
+        text = _IDENTITY_SUBJECT_PREFIX.sub("", text).strip()
+    return text
+
 
 def infer_context_subject(
     question: str, sources: list[dict[str, Any]]
@@ -1136,18 +1209,27 @@ def infer_context_subject(
     query_tokens = _context_tokens(canonicalize_technical_names(question))
     if not query_tokens:
         return None
-    scored: dict[str, int] = {}
+    # ``depth`` is intentional: when the query names both a parent product and
+    # one of its tools («дообучение в АРМ DS»), the active topic must be the
+    # deepest matching component.  Otherwise the next elliptical question is
+    # scoped to all of АРМ DS and can retrieve a sibling tool's configuration.
+    scored: dict[str, tuple[int, int]] = {}
     for source in sources:
-        names: list[str] = []
+        names: list[tuple[str, int]] = []
         title = " ".join(str(source.get("title") or "").strip().split())
-        if title:
-            names.append(title)
         path = str(source.get("path") or "")
-        for part in path.replace("\\", "/").split("/"):
+        path_parts = path.replace("\\", "/").split("/")
+        for depth, part in enumerate(path_parts):
             name = re.sub(r"\.[a-z0-9]{1,8}$", "", part.strip(), flags=re.IGNORECASE)
             if name:
-                names.append(name)
-        for name in names:
+                names.append((_identity_subject(name), depth))
+        if title and not names:
+            # A title is usually the leaf page label.  Give it the leaf depth,
+            # but strip «Пользовательская инструкция.» before comparison.
+            names.append((_identity_subject(title), len(path_parts) - 1))
+        for name, depth in names:
+            if not name:
+                continue
             if name.casefold() in _GENERIC_IDENTITY_NAMES:
                 continue
             name_tokens = _context_tokens(name)
@@ -1160,11 +1242,14 @@ def infer_context_subject(
                 )
             )
             if score:
-                scored[name] = max(scored.get(name, 0), score)
+                previous = scored.get(name)
+                rank = (depth, score)
+                if previous is None or rank > previous:
+                    scored[name] = rank
     if not scored:
         return None
-    best_score = max(scored.values())
-    best = [name for name, score in scored.items() if score == best_score]
+    best_rank = max(scored.values())
+    best = [name for name, rank in scored.items() if rank == best_rank]
     # Prefer the narrow canonical component over a title padded with generic
     # words (e.g. «Конфигурация Мониторинга моделей»).
     return min(best, key=lambda value: (len(_context_tokens(value)), len(value)))

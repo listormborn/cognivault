@@ -583,6 +583,45 @@ def test_infer_context_subject_uses_specific_matching_path_component():
     ) == "Мониторинг моделей"
 
 
+def test_infer_context_subject_prefers_child_tool_over_parent_product():
+    assert rag_pipeline.infer_context_subject(
+        "Что такое дообучение в АРМ DS?",
+        [
+            {
+                "path": (
+                    "Продукты/АРМ DS/Автоматическое дообучение/"
+                    "Пользовательская инструкция. Автоматическое дообучение.md"
+                ),
+                "title": "Пользовательская инструкция. Автоматическое дообучение",
+            }
+        ],
+    ) == "Автоматическое дообучение"
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Какую конфигурацию нужно заполнить?",
+        "Какие параметры обязательны?",
+        "Что конкретно нужно указать в конфигурации?",
+        "Какую команду выполнить?",
+    ],
+)
+def test_generic_technical_followup_requires_history_subject(question):
+    assert rag_pipeline.needs_history_resolution(question)
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Какую конфигурацию нужно заполнить для YAFCA?",
+        "Какие параметры обязательны в мониторинге моделей?",
+    ],
+)
+def test_named_technical_question_does_not_inherit_previous_subject(question):
+    assert not rag_pipeline.needs_history_resolution(question)
+
+
 def test_condense_history_capped_at_six_turns(monkeypatch):
     calls = _install_complete_json(monkeypatch, lambda p: {"intent": "kb_question"})
     messages = [
@@ -1619,6 +1658,66 @@ def test_persisted_subject_filters_other_products_when_model_omits_it(monkeypatc
     assert [source["path"] for source in ctx.sources] == [
         "Продукты/Мониторинг моделей/Конфигурация.md"
     ]
+
+
+def test_generic_configuration_followup_keeps_narrow_child_topic(monkeypatch):
+    training = _frag(
+        1,
+        text="В автоматическом дообучении заполняются параметры потока learn.",
+    )
+    training.update(
+        path=(
+            "Продукты/АРМ DS/Автоматическое дообучение/"
+            "Пользовательская инструкция. Автоматическое дообучение.md"
+        ),
+        title="Пользовательская инструкция. Автоматическое дообучение",
+    )
+    monitoring = _frag(
+        2,
+        text="В мониторинге моделей заполняется конфигурация метрик.",
+    )
+    monitoring.update(
+        path="Продукты/АРМ DS/Мониторинг моделей/Конфигурация.md",
+        title="Конфигурация Мониторинга моделей",
+    )
+    seen = _install_retrieval(monkeypatch, [training, monitoring])
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {
+            # Deliberately reproduce the bad broad model verdict.  Server-side
+            # context must keep the narrower persisted child tool regardless.
+            "intent": "kb_question",
+            "standalone_question": "Какую конфигурацию заполнить в АРМ DS?",
+            "uses_history": True,
+            "context_subject": "АРМ DS",
+            "scope": "document",
+        }
+        if _is_condense(prompt)
+        else {
+            "grades": [
+                {"id": 1, "score": 5},
+                {"id": 2, "score": 5},
+            ]
+        },
+    )
+    history = [
+        {"role": "user", "content": "Что такое дообучение в АРМ DS?"},
+        {
+            "role": "assistant",
+            "content": "Автоматическое дообучение запускает обучение модели.",
+        },
+    ]
+
+    ctx = _build(
+        "Какую конфигурацию нужно заполнить?",
+        history,
+        active_context={"subject": "Автоматическое дообучение"},
+    )
+
+    assert ctx.context_subject == "Автоматическое дообучение"
+    assert "Автоматическое дообучение" in seen[0][0]
+    assert [source["path"] for source in ctx.sources] == [training["path"]]
+    assert "Мониторинг моделей" not in ctx.user_message["content"]
 
 
 # --------------------------------------------------------------------------- #
