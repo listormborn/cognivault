@@ -316,7 +316,9 @@ def test_chat_persists_untrimmed_history(monkeypatch, tmp_path):
     captured = _install_chat_stubs(monkeypatch, tmp_path, rag=True)
     saved: list[list[dict]] = []
     monkeypatch.setattr(
-        history, "save_chat", lambda cid, msgs, paths: saved.append(list(msgs))
+        history,
+        "save_chat",
+        lambda cid, msgs, paths, **kwargs: saved.append(list(msgs)),
     )
 
     messages = _long_thread()

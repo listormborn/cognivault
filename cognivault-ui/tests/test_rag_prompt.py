@@ -811,7 +811,7 @@ def test_chat_reports_invalid_citation(monkeypatch, tmp_path, caplog):
     saved: list[list[dict]] = []
     monkeypatch.setattr(
         chat_routes.history, "save_chat",
-        lambda cid, msgs, paths: saved.append([dict(m) for m in msgs]),
+        lambda cid, msgs, paths, **kwargs: saved.append([dict(m) for m in msgs]),
     )
 
     with caplog.at_level(logging.WARNING, logger="cognivault-ui.chat"):
@@ -839,7 +839,7 @@ def test_chat_valid_citations_are_silent(monkeypatch, tmp_path):
     saved: list[list[dict]] = []
     monkeypatch.setattr(
         chat_routes.history, "save_chat",
-        lambda cid, msgs, paths: saved.append([dict(m) for m in msgs]),
+        lambda cid, msgs, paths, **kwargs: saved.append([dict(m) for m in msgs]),
     )
 
     with TestClient(create_app()) as client:

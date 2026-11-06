@@ -369,6 +369,30 @@ def test_condense_rewrites_question(monkeypatch):
     assert "что такое SberOSC" in calls[0]
 
 
+def test_condense_receives_persisted_active_topic(monkeypatch):
+    calls = _install_complete_json(
+        monkeypatch,
+        lambda p: {
+            "intent": "kb_question",
+            "standalone_question": "Как настроить Мониторинг моделей?",
+            "uses_history": True,
+            "context_subject": "Мониторинг моделей",
+        },
+    )
+
+    asyncio.run(
+        rag_pipeline.condense(
+            "А как его настроить?",
+            _history(),
+            {},
+            {},
+            active_context={"subject": "Мониторинг моделей"},
+        )
+    )
+
+    assert "Активная тема этого чата: Мониторинг моделей" in calls[0]
+
+
 def test_condense_resolves_example_followup_without_a_pronoun(monkeypatch):
     _install_complete_json(
         monkeypatch,
@@ -507,6 +531,18 @@ def test_context_subject_matching_supports_morphology_and_short_acronyms():
     assert not rag_pipeline.source_matches_context_subject(
         "Мониторинг моделей", {"path": "Продукты/YAFCA/Конфигурация.md"}
     )
+
+
+def test_infer_context_subject_uses_specific_matching_path_component():
+    assert rag_pipeline.infer_context_subject(
+        "Что такое Мониторинг моделей?",
+        [
+            {
+                "path": "Продукты/Мониторинг моделей/Описание.md",
+                "title": "Описание Мониторинга моделей",
+            }
+        ],
+    ) == "Мониторинг моделей"
 
 
 def test_condense_history_capped_at_six_turns(monkeypatch):
@@ -1129,10 +1165,19 @@ def _install_retrieval(monkeypatch, hits: list[dict]):
     return seen
 
 
-def _build(query, messages=None, **rcfg):
+def _build(query, messages=None, active_context=None, **rcfg):
     cfg = {"mode": "auto", "max_expanded_files": 0}
     cfg.update(rcfg)
-    return asyncio.run(rag.build_rag_context(query, cfg, None, {}, messages))
+    return asyncio.run(
+        rag.build_rag_context(
+            query,
+            cfg,
+            None,
+            {},
+            messages,
+            active_context=active_context,
+        )
+    )
 
 
 @pytest.mark.parametrize(
@@ -1305,6 +1350,47 @@ def test_active_topic_filters_other_tools_from_configuration_answer(monkeypatch)
     assert "Мониторинга моделей" in ctx.user_message["content"]
     assert "YAFCA" not in ctx.user_message["content"]
     assert "Fincert" not in ctx.user_message["content"]
+
+
+def test_persisted_subject_filters_other_products_when_model_omits_it(monkeypatch):
+    """Server state remains a hard boundary if condense drops one JSON key."""
+    monitoring = _frag(1, text="Для мониторинга моделей конфигурация обязательна.")
+    monitoring.update(
+        path="Продукты/Мониторинг моделей/Конфигурация.md",
+        title="Конфигурация Мониторинга моделей",
+    )
+    yafca = _frag(2, text="Для YAFCA заполните конфигурацию потоков.")
+    yafca.update(path="Продукты/YAFCA/Конфигурация.md", title="YAFCA")
+    _install_retrieval(monkeypatch, [monitoring, yafca])
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {
+            "intent": "kb_question",
+            "standalone_question": (
+                "Нужно ли заполнять конфигурацию для мониторинга?"
+            ),
+            "uses_history": False,
+            "scope": "document",
+        }
+        if _is_condense(prompt)
+        else {
+            "grades": [
+                {"id": 1, "score": 5},
+                {"id": 2, "score": 5},
+            ]
+        },
+    )
+
+    ctx = _build(
+        "Нужно ли заполнять конфигурацию для мониторинга?",
+        _history(),
+        active_context={"subject": "Мониторинг моделей"},
+    )
+
+    assert ctx.context_subject == "Мониторинг моделей"
+    assert [source["path"] for source in ctx.sources] == [
+        "Продукты/Мониторинг моделей/Конфигурация.md"
+    ]
 
 
 # --------------------------------------------------------------------------- #

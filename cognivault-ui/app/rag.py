@@ -382,6 +382,7 @@ class RagContext:
       clarification branch mean retrieval was skipped on purpose;
     * ``standalone_question`` — the rewritten, self-contained question actually
       used for retrieval and for the final user turn;
+    * ``context_subject`` — canonical active topic to persist for the next turn;
     * ``candidates`` — every retrieved candidate BEFORE selection
       (``path``, ``chunk_index``, ``score``, ``rank``), for the query log;
     * ``grades`` — grader output (``id``, ``path``, ``chunk_index``, ``score``),
@@ -416,6 +417,7 @@ class RagContext:
     context_chars: int = 0
     intent: str | None = None
     standalone_question: str | None = None
+    context_subject: str | None = None
     candidates: list[dict[str, Any]] | None = None
     grades: list[dict[str, Any]] | None = None
     answer_override: str | None = None
@@ -953,6 +955,7 @@ async def _build_auto(
     messages: list[dict[str, Any]] | None,
     cv: dict[str, Any] | None,
     prompts: dict[str, Any] | None = None,
+    active_context: dict[str, Any] | None = None,
 ) -> RagContext:
     min_score = rcfg.get("min_score")
     file_full_chars = int(rcfg.get("file_full_chars", 6000))
@@ -988,7 +991,7 @@ async def _build_auto(
     # Отчёты обоих скрытых вызовов уезжают в запись хода одним словарём; он
     # общий для всех `RagContext` ниже, поэтому грейдер дописывает в него же.
     condensed, condense_report = await rag_pipeline.condense_with_report(
-        query, messages, rcfg, gcfg
+        query, messages, rcfg, gcfg, active_context=active_context
     )
     hidden: dict[str, Any] = {"condense": condense_report, "grader": None}
     intent = condensed.intent
@@ -996,10 +999,19 @@ async def _build_auto(
     scope = condensed.scope
     shape = condensed.shape
     context_subject = condensed.subject
+    active_subject = str((active_context or {}).get("subject") or "").strip()
+    if (
+        not context_subject
+        and active_subject
+        and scope == corpus_scope.DEFAULT_SCOPE
+        and rag_pipeline.text_mentions_context_subject(rq, active_subject)
+    ):
+        context_subject = active_subject
     if intent == rag_pipeline.CONTEXT_CLARIFICATION_INTENT:
         return RagContext(
             intent=intent,
             standalone_question=query,
+            context_subject=context_subject,
             answer_override=(
                 _NO_EXAMPLE_SUBJECT
                 if rag_pipeline.requests_example(query)
@@ -1023,6 +1035,7 @@ async def _build_auto(
         return RagContext(
             intent=intent,
             standalone_question=rq,
+            context_subject=context_subject,
             answer_override=_NO_EXAMPLE_SUBJECT,
             scope=scope,
             hidden_calls=hidden,
@@ -1069,6 +1082,7 @@ async def _build_auto(
             system_message=_system_message(NO_RAG_SYSTEM_PROMPT),
             intent=intent,
             standalone_question=rq,
+            context_subject=context_subject,
             scope=scope,
             hidden_calls=hidden,
         )
@@ -1103,6 +1117,7 @@ async def _build_auto(
             notice=_RETRIEVAL_UNAVAILABLE,
             intent=intent,
             standalone_question=rq,
+            context_subject=context_subject,
             scope=scope,
             hidden_calls=hidden,
         )
@@ -1120,9 +1135,31 @@ async def _build_auto(
             answer_override=_NO_EXACT_EXAMPLE if exact_example else _NO_ANSWER,
             intent=intent,
             standalone_question=rq,
+            context_subject=context_subject,
             scope=scope,
             hidden_calls=hidden,
         )
+
+    # Enforce the active product boundary before the grader.  Apart from being
+    # safer, this avoids spending a hidden model call on similarly named pages
+    # from unrelated tools (the common case for «конфигурация» and «пример»).
+    if context_subject and scope == corpus_scope.DEFAULT_SCOPE:
+        fragments = [
+            fragment
+            for fragment in fragments
+            if rag_pipeline.source_matches_context_subject(
+                context_subject, fragment
+            )
+        ]
+        if not fragments:
+            return RagContext(
+                intent=intent,
+                standalone_question=rq,
+                context_subject=context_subject,
+                answer_override=_NO_ANSWER,
+                scope=scope,
+                hidden_calls=hidden,
+            )
 
     candidates = [
         {
@@ -1171,34 +1208,13 @@ async def _build_auto(
         return RagContext(
             intent=intent,
             standalone_question=rq,
+            context_subject=context_subject,
             candidates=candidates,
             grades=grades_meta,
             answer_override=_NO_EXACT_EXAMPLE if exact_example else _NO_ANSWER,
             scope=scope,
             hidden_calls=hidden,
         )
-
-    # A resolved active topic is a hard retrieval boundary, not just a hint to
-    # the grader. Generic terms such as «конфигурация» otherwise pull equally
-    # plausible pages for several products and produce a combined answer.
-    if context_subject and scope == corpus_scope.DEFAULT_SCOPE:
-        fragments = [
-            fragment
-            for fragment in fragments
-            if rag_pipeline.source_matches_context_subject(
-                context_subject, fragment
-            )
-        ]
-        if not fragments:
-            return RagContext(
-                intent=intent,
-                standalone_question=rq,
-                candidates=candidates,
-                grades=grades_meta,
-                answer_override=_NO_ANSWER,
-                scope=scope,
-                hidden_calls=hidden,
-            )
 
     # Even a non-technical follow-up («есть ли примеры?») stays within the one
     # product restored by condense.  Relevance grading alone is not enough here:
@@ -1213,6 +1229,7 @@ async def _build_auto(
             return RagContext(
                 intent=intent,
                 standalone_question=rq,
+                context_subject=context_subject,
                 candidates=candidates,
                 grades=grades_meta,
                 answer_override=_NO_EXACT_EXAMPLE if exact_example else _NO_ANSWER,
@@ -1344,11 +1361,17 @@ async def _build_auto(
         return RagContext(
             intent=intent,
             standalone_question=rq,
+            context_subject=context_subject,
             candidates=candidates,
             grades=grades_meta,
             scope=scope,
             hidden_calls=hidden,
         )
+
+    resolved_context_subject = (
+        context_subject
+        or rag_pipeline.infer_context_subject(answer_query, sources)
+    )
 
     if exact_example:
         # Do not ask the answer model to reproduce or "improve" configuration:
@@ -1367,6 +1390,7 @@ async def _build_auto(
                     context_chars=len(block),
                     intent=intent,
                     standalone_question=rq,
+                    context_subject=resolved_context_subject,
                     candidates=candidates,
                     grades=grades_meta,
                     answer_override=(
@@ -1380,6 +1404,7 @@ async def _build_auto(
         return RagContext(
             intent=intent,
             standalone_question=rq,
+            context_subject=resolved_context_subject,
             candidates=candidates,
             grades=grades_meta,
             answer_override=_NO_EXACT_EXAMPLE,
@@ -1424,6 +1449,7 @@ async def _build_auto(
         context_chars=context_chars,
         intent=intent,
         standalone_question=rq,
+        context_subject=resolved_context_subject,
         candidates=candidates,
         grades=grades_meta,
         scope=scope,
@@ -1532,6 +1558,7 @@ async def build_rag_context(
     gcfg: dict[str, Any] | None = None,
     messages: list[dict[str, Any]] | None = None,
     prompts: dict[str, Any] | None = None,
+    active_context: dict[str, Any] | None = None,
 ) -> RagContext:
     """Assemble the RAG messages + sources for ``query``.
 
@@ -1580,5 +1607,13 @@ async def build_rag_context(
 
     mode = str(rcfg.get("mode", "auto"))
     if mode == "auto":
-        return await _build_auto(query, rcfg, gcfg or {}, messages, cvcfg, prompts)
+        return await _build_auto(
+            query,
+            rcfg,
+            gcfg or {},
+            messages,
+            cvcfg,
+            prompts,
+            active_context,
+        )
     return await _build_legacy(query, rcfg, cvcfg, prompts)

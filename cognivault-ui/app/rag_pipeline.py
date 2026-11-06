@@ -243,6 +243,14 @@ _CONDENSE_TASKS = """
   «Мониторинг моделей») считай продолжением: восстанови полное название в
   standalone_question, поставь uses_history=true и context_subject="Мониторинг моделей".
   Для вопроса по всей базе и при неоднозначности context_subject=null.
+- Активная тема чата — выбранный ранее конкретный объект. Любой зависимый вопрос
+  без нового явно названного объекта («нужно ли заполнять конфигурацию?», «а где
+  это находится?», «есть ли пример?») относится только к активной теме: включи её
+  полное название в standalone_question и context_subject. Не добавляй объекты из
+  более старых реплик и не объединяй несколько продуктов. Явно названный новый
+  объект переключает активную тему; самодостаточный вопрос по всей базе её не
+  использует. Если непонятно, относится ли реплика к активной теме, запроси
+  уточнение вместо выбора наугад.
 - Поле uses_history=true ставь только когда без истории нельзя понять местоимение,
   пропущенный объект или явную отсылку («это», «его», «а как настроить?»,
   «предыдущий ответ»). Для самостоятельного нового вопроса — false.
@@ -277,7 +285,11 @@ _GRADE_SCALE = """
 Отвечай только JSON, без рассуждений и пояснений до или после него."""
 
 
-def _condense_prompt(question: str, history: list[dict[str, Any]]) -> str:
+def _condense_prompt(
+    question: str,
+    history: list[dict[str, Any]],
+    active_context: dict[str, Any] | None = None,
+) -> str:
     rendered = (
         "\n".join(
             f"{_ROLE_LABELS.get(str(m.get('role')), str(m.get('role')))}: "
@@ -289,7 +301,10 @@ def _condense_prompt(question: str, history: list[dict[str, Any]]) -> str:
         # the model to invent the missing turns.
         or "(пусто — это первая реплика пользователя)"
     )
+    active_subject = _context_subject((active_context or {}).get("subject"))
+    active = active_subject or "(не установлена)"
     head = (
+        f"Активная тема этого чата: {active}\n"
         f"История диалога:\n{rendered}\n"
         f"Последняя реплика пользователя: {question}\n"
     )
@@ -902,6 +917,58 @@ def source_matches_context_subject(subject: str, source: dict[str, Any]) -> bool
     )
 
 
+_GENERIC_IDENTITY_NAMES = {
+    "описание", "обзор", "инструкция", "конфигурация", "настройка",
+    "документация", "главная", "readme", "index",
+}
+
+
+def infer_context_subject(
+    question: str, sources: list[dict[str, Any]]
+) -> str | None:
+    """Infer a canonical active topic from a first-turn question and sources.
+
+    Condense is normally skipped on the first turn, so persisted chat context
+    needs one deterministic bootstrap.  The chosen title/path component must
+    overlap the question; generic page names alone never establish a topic.
+    """
+    query_tokens = _context_tokens(str(question or ""))
+    if not query_tokens:
+        return None
+    scored: dict[str, int] = {}
+    for source in sources:
+        names: list[str] = []
+        title = " ".join(str(source.get("title") or "").strip().split())
+        if title:
+            names.append(title)
+        path = str(source.get("path") or "")
+        for part in path.replace("\\", "/").split("/"):
+            name = re.sub(r"\.[a-z0-9]{1,8}$", "", part.strip(), flags=re.IGNORECASE)
+            if name:
+                names.append(name)
+        for name in names:
+            if name.casefold() in _GENERIC_IDENTITY_NAMES:
+                continue
+            name_tokens = _context_tokens(name)
+            score = sum(
+                1
+                for query_token in query_tokens
+                if any(
+                    _same_context_token(query_token, name_token)
+                    for name_token in name_tokens
+                )
+            )
+            if score:
+                scored[name] = max(scored.get(name, 0), score)
+    if not scored:
+        return None
+    best_score = max(scored.values())
+    best = [name for name, score in scored.items() if score == best_score]
+    # Prefer the narrow canonical component over a title padded with generic
+    # words (e.g. «Конфигурация Мониторинга моделей»).
+    return min(best, key=lambda value: (len(_context_tokens(value)), len(value)))
+
+
 def _parse_condense(
     data: dict[str, Any],
     question: str,
@@ -993,6 +1060,7 @@ async def condense(
     messages: list[dict[str, Any]] | None,
     rcfg: dict[str, Any],
     gcfg: dict[str, Any] | None,
+    active_context: dict[str, Any] | None = None,
 ) -> Condensed:
     """Classify the user's turn and rewrite it into a self-contained question.
 
@@ -1019,7 +1087,9 @@ async def condense(
     about («что ты знаешь?») is handled with no call at all by
     :func:`app.corpus_scope.match_meta`.
     """
-    condensed, _ = await condense_with_report(question, messages, rcfg, gcfg)
+    condensed, _ = await condense_with_report(
+        question, messages, rcfg, gcfg, active_context=active_context
+    )
     return condensed
 
 
@@ -1028,6 +1098,7 @@ async def condense_with_report(
     messages: list[dict[str, Any]] | None,
     rcfg: dict[str, Any],
     gcfg: dict[str, Any] | None,
+    active_context: dict[str, Any] | None = None,
 ) -> tuple[Condensed, dict[str, Any]]:
     """:func:`condense` plus a report of what the hidden call did.
 
@@ -1060,7 +1131,7 @@ async def condense_with_report(
     trace: dict[str, Any] = {}
     try:
         data = await _call(
-            _condense_prompt(question, history),
+            _condense_prompt(question, history, active_context),
             gcfg,
             timeout=float(rcfg.get("condense_timeout") or _CONDENSE_TIMEOUT),
             max_tokens=int(rcfg.get("condense_max_tokens") or _CONDENSE_MAX_TOKENS),

@@ -1,8 +1,9 @@
 """Chat history persistence under ``~/.cognivault-ui/history/{id}.json``.
 
-Each file: ``{id, title, created_at, updated_at, messages:[...]}``. Writes are
-atomic; after every save the store is pruned to the newest 10 chats. RAG system
-prompts are never persisted.
+Each file: ``{id, title, created_at, updated_at, messages:[...], context:{...}}``.
+Writes are atomic; after every save the store is pruned to the newest 10 chats.
+RAG system prompts are never persisted.  ``context`` stores only bounded,
+server-derived conversation state, currently the canonical active subject.
 """
 
 from __future__ import annotations
@@ -76,6 +77,16 @@ def _sanitize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return clean
 
 
+def _sanitize_context(value: Any) -> dict[str, str] | None:
+    """Return the small, trusted subset of persisted conversation state."""
+    if not isinstance(value, dict):
+        return None
+    subject = " ".join(str(value.get("subject") or "").strip().split())
+    if not subject or len(subject) > 160 or len(subject.split()) > 12:
+        return None
+    return {"subject": subject}
+
+
 def list_chats(paths: AppPaths | None = None) -> list[dict[str, Any]]:
     """Return newest-10 chat summaries, sorted by ``updated_at`` descending."""
     paths = paths or PATHS
@@ -117,11 +128,13 @@ def save_chat(
     messages: list[dict[str, Any]],
     paths: AppPaths | None = None,
     created_at: str | None = None,
+    context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Persist a chat atomically, then prune to the newest ``MAX_CHATS``.
 
     System messages are dropped before writing. ``created_at`` is preserved from
-    any existing file unless explicitly provided.
+    any existing file unless explicitly provided.  Omitting ``context`` keeps
+    the existing active subject so legacy callers cannot erase it accidentally.
     """
     paths = paths or PATHS
     paths.ensure_dirs()
@@ -138,6 +151,11 @@ def save_chat(
         "updated_at": now,
         "messages": clean,
     }
+    clean_context = _sanitize_context(
+        context if context is not None else (existing or {}).get("context")
+    )
+    if clean_context is not None:
+        record["context"] = clean_context
 
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(

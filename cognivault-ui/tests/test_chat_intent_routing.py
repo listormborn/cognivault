@@ -27,7 +27,7 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app import rag, rag_log, settings  # noqa: E402
+from app import history, rag, rag_log, settings  # noqa: E402
 from app.config import AppPaths  # noqa: E402
 from app.history import load_chat  # noqa: E402
 from app.main import create_app  # noqa: E402
@@ -83,7 +83,13 @@ def _install(monkeypatch, paths, ctx, *, answer="ответ модели"):
     calls: list[dict] = []
 
     async def fake_build_rag_context(query, *args, **kwargs):
-        calls.append({"kind": "rag", "query": query})
+        calls.append(
+            {
+                "kind": "rag",
+                "query": query,
+                "active_context": kwargs.get("active_context"),
+            }
+        )
         return ctx
 
     async def fake_stream_chat(messages, gcfg):
@@ -128,6 +134,32 @@ def _kb_ctx(question: str = "как настроить ЕФС в 1С?") -> rag.R
 
 def _post(client, messages, **extra):
     return client.post("/api/chat", json={"messages": messages, "rag": True, **extra})
+
+
+def test_chat_loads_and_replaces_persisted_active_topic(tmp_path, monkeypatch):
+    paths = _paths(tmp_path)
+    chat_id = "topic-state"
+    history.save_chat(
+        chat_id,
+        [{"role": "user", "content": "Что такое Мониторинг моделей?"}],
+        paths,
+        context={"subject": "Мониторинг моделей"},
+    )
+    ctx = _kb_ctx("Что такое Fincert Exporter?")
+    ctx.context_subject = "Fincert Exporter"
+    calls = _install(monkeypatch, paths, ctx)
+
+    with TestClient(create_app()) as client:
+        response = _post(
+            client,
+            [{"role": "user", "content": "Что такое Fincert Exporter?"}],
+            chat_id=chat_id,
+        )
+
+    assert response.status_code == 200
+    rag_call = next(call for call in calls if call["kind"] == "rag")
+    assert rag_call["active_context"] == {"subject": "Мониторинг моделей"}
+    assert load_chat(chat_id, paths)["context"] == {"subject": "Fincert Exporter"}
 
 
 # --------------------------------------------------------------------------- #

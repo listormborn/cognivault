@@ -449,6 +449,13 @@ async def chat(request: Request) -> Any:
     # Per-request identity/context: which CogniVault + which history bucket.
     cv = cv_context(request)
     paths = resolve_paths(request)
+    # The client sends the visible messages, but the canonical active topic is
+    # server-derived state.  Load it by chat id instead of trusting a browser
+    # field; this also lets a follow-up survive a page reload or pod restart
+    # when the history volume is persistent.
+    stored_chat = history.load_chat(chat_id, paths) or {}
+    stored_context = stored_chat.get("context")
+    active_context = stored_context if isinstance(stored_context, dict) else None
 
     # Reverse index {vault_path: confluence_page_url} so RAG source chips can link
     # back to their origin Confluence page. Defensive: a manifest error must never
@@ -504,6 +511,9 @@ async def chat(request: Request) -> Any:
 
     async def generator() -> AsyncIterator[str]:
         full_text = ""
+        # Preserve the established topic on smalltalk, technical errors and
+        # clarification turns.  A successful RAG turn may replace it below.
+        next_context = dict(active_context or {})
         # Повтор генерации на пустом ответе с `finish_reason=length` (см.
         # `_retry_config`). Конфиг ответа подменяется на копию с бо́льшим
         # бюджетом; `finish_reason` в конце читается с того объекта, который
@@ -588,6 +598,11 @@ async def chat(request: Request) -> Any:
                         full_text = str(verified.get("verified_answer") or "")
                         raw_sources = verified.get("sources")
                         sources = raw_sources if isinstance(raw_sources, list) else []
+                        verified_subject = rag_pipeline.infer_context_subject(
+                            question_raw, sources
+                        )
+                        if verified_subject:
+                            next_context = {"subject": verified_subject}
                         rag_used = True
                         finish_reason = "verified_feedback"
                         log.info(
@@ -607,7 +622,13 @@ async def chat(request: Request) -> Any:
                     query = _last_user_content(outgoing)
                     rag_started = time.perf_counter()
                     ctx = await rag.build_rag_context(
-                        query, rcfg, cv, giga_dict, outgoing, prompts=prompts
+                        query,
+                        rcfg,
+                        cv,
+                        giga_dict,
+                        outgoing,
+                        prompts=prompts,
+                        active_context=active_context,
                     )
                     stages["rag"] = _elapsed_ms(rag_started)
                     sources = ctx.sources
@@ -628,6 +649,11 @@ async def chat(request: Request) -> Any:
                     head_block_kind = getattr(ctx, "head_block_kind", None)
                     head_block_chars = getattr(ctx, "head_block_chars", 0)
                     hidden_calls = getattr(ctx, "hidden_calls", None)
+                    resolved_subject = getattr(ctx, "context_subject", None)
+                    if isinstance(resolved_subject, str) and resolved_subject.strip():
+                        next_context = {
+                            "subject": " ".join(resolved_subject.strip().split())
+                        }
 
                     if answer_override:
                         # Ответ уже готов (шаблонный отказ: ни один кандидат не
@@ -819,7 +845,12 @@ async def chat(request: Request) -> Any:
                 # Persist even partial/errored turns so the user keeps their history.
                 if full_text or not errored:
                     try:
-                        history.save_chat(chat_id, [*user_messages, assistant], paths)
+                        history.save_chat(
+                            chat_id,
+                            [*user_messages, assistant],
+                            paths,
+                            context=next_context or None,
+                        )
                     except Exception:  # noqa: BLE001
                         log.exception("failed to persist chat %s", chat_id)
 
