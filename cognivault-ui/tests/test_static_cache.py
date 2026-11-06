@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import sys
+from html.parser import HTMLParser
 
 import pytest
 from fastapi.testclient import TestClient
@@ -63,6 +64,27 @@ def test_index_html_served_at_root(client: TestClient) -> None:
     resp = client.get("/")
     assert resp.status_code == 200
     assert "text/html" in resp.headers.get("content-type", "")
+
+
+def test_chat_composer_preserves_technical_names(client: TestClient) -> None:
+    """Mobile/desktop text assistance must not rewrite product names."""
+
+    class ComposerParser(HTMLParser):
+        attrs: dict[str, str | None] | None = None
+
+        def handle_starttag(self, tag, attrs):
+            values = dict(attrs)
+            if tag == "textarea" and values.get("id") == "composer-input":
+                self.attrs = values
+
+    parser = ComposerParser()
+    parser.feed(client.get("/").text)
+    assert parser.attrs is not None
+    assert parser.attrs["autocomplete"] == "off"
+    assert parser.attrs["autocorrect"] == "off"
+    assert parser.attrs["autocapitalize"] == "off"
+    assert parser.attrs["spellcheck"] == "false"
+    assert parser.attrs["data-gramm"] == "false"
 
 
 def test_api_and_healthz_not_no_store(client: TestClient) -> None:

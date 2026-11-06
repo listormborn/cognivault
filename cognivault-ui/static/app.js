@@ -202,6 +202,21 @@
     if (text != null) e.textContent = text;
     return e;
   }
+  function preserveTechnicalTerms(field) {
+    // Product names and acronyms (YAFCA, Fincert, KitAI, DL REST API, etc.)
+    // must reach the backend exactly as typed.  These attributes cover native
+    // desktop/mobile autocorrection plus the common Grammarly integration.
+    if (!field) return field;
+    field.spellcheck = false;
+    field.setAttribute("spellcheck", "false");
+    field.setAttribute("autocomplete", "off");
+    field.setAttribute("autocorrect", "off");
+    field.setAttribute("autocapitalize", "off");
+    field.setAttribute("data-gramm", "false");
+    field.setAttribute("data-gramm_editor", "false");
+    field.setAttribute("data-enable-grammarly", "false");
+    return field;
+  }
   function escapeHtml(s) {
     return String(s)
       .replace(/&/g, "&amp;")
@@ -2347,6 +2362,7 @@
       reason.appendChild(option);
     });
     const comment = document.createElement("textarea");
+    preserveTechnicalTerms(comment);
     comment.className = "textarea fb-comment";
     comment.maxLength = 1000;
     comment.placeholder = "Что именно нужно исправить? (необязательно)";
@@ -2450,6 +2466,7 @@
     }
 
     const corrected = document.createElement("textarea");
+    preserveTechnicalTerms(corrected);
     corrected.className = "textarea feedback-correction";
     corrected.placeholder = "Исправленный проверенный ответ. Если оставить пустым, будет подтверждён исходный ответ.";
     corrected.value = item.corrected_answer || "";
@@ -2969,6 +2986,10 @@
   }
 
   async function init() {
+    // Apply the same protection to every text area already present in the
+    // shell (chat composer and editable prompts). Dynamically created feedback
+    // fields opt in at creation time above.
+    document.querySelectorAll("textarea").forEach(preserveTechnicalTerms);
     wireEvents();
     renderWelcome();
     // config first (drives mode + theme + rag defaults + banner). No auth needed
