@@ -533,6 +533,44 @@ def test_context_subject_matching_supports_morphology_and_short_acronyms():
     )
 
 
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("Что такое финцерт энричер?", "Что такое Fincert Enricher?"),
+        ("Расскажи про финсерт-энричер", "Расскажи про Fincert Enricher"),
+        ("Что знаешь про финцерт?", "Что знаешь про Fincert?"),
+        ("Расскажи про enricher", "Расскажи про Fincert Enricher"),
+        ("Как работает яфка?", "Как работает YAFCA?"),
+        ("Где описан дата лайнедж?", "Где описан Data Lineage?"),
+        ("Есть ли библиотеки фиче стор?", "Есть ли библиотеки Feature Store?"),
+    ],
+)
+def test_russian_phonetic_product_names_are_canonicalized(question, expected):
+    assert rag_pipeline.canonicalize_technical_names(question) == expected
+
+
+def test_russian_product_subject_matches_english_source_identity():
+    source = {
+        "path": "Продукты/Fincert/Fincert-enricher.md",
+        "title": "Пользовательская инструкция. Fincert-enricher",
+    }
+    assert rag_pipeline.text_mentions_context_subject(
+        "что такое финцерт энричер", "Fincert Enricher"
+    )
+    assert rag_pipeline.source_matches_context_subject(
+        "финцерт энричер", source
+    )
+
+
+def test_multiple_product_names_do_not_choose_one_active_subject():
+    assert (
+        rag_pipeline.transliterated_technical_subject(
+            "Сравни финцерт и YAFCA"
+        )
+        is None
+    )
+
+
 def test_infer_context_subject_uses_specific_matching_path_component():
     assert rag_pipeline.infer_context_subject(
         "Что такое Мониторинг моделей?",
@@ -1186,6 +1224,13 @@ def _build(query, messages=None, active_context=None, **rcfg):
         "Купи холодильник",
         "Пожалуйста, закажите холодильник",
         "Можешь мне купить холодильник?",
+        "Можешь помочь выбрать холодильник?",
+        "Не могла бы ты подобрать холодильник?",
+        "Я попросила купить холодильник",
+        "Хочу заказать холодильник",
+        "Помоги выбрать холодильник",
+        "Порекомендуй модель холодильника",
+        "Подбери подходящий телевизор",
         "Помоги забронировать билет",
         "Оплати заказ",
     ],
@@ -1205,6 +1250,10 @@ def test_external_action_is_refused_before_model_and_retrieval(monkeypatch, quer
 
     assert ctx.intent == "out_of_scope"
     assert ctx.answer_override == rag._EXTERNAL_ACTION_ANSWER
+    assert ctx.answer_override == (
+        "У меня нет информации для выполнения такой просьбы. "
+        "Я могу помочь только с вопросами по текущей базе знаний."
+    )
     assert ctx.standalone_question == query
     assert ctx.sources == []
     assert seen == []
@@ -1215,12 +1264,26 @@ def test_external_action_is_refused_before_model_and_retrieval(monkeypatch, quer
     [
         "Как купить лицензию Fincert?",
         "Как заказать доступ к Bitbucket Fincert?",
+        "Как выбрать инструмент из базы знаний?",
+        "Как подобрать параметры конфигурации Fincert?",
         "Какие способы оплаты описаны в документации?",
     ],
 )
 def test_informational_action_question_is_not_blocked(query):
     """Вопрос о документированном процессе — не просьба выполнить действие."""
     assert rag._EXTERNAL_ACTION_REQUEST.search(query) is None
+
+
+def test_prompts_use_neutral_knowledge_base_wording():
+    for prompt in (
+        rag.SYSTEM_PROMPT,
+        rag.NO_RAG_SYSTEM_PROMPT,
+        rag.META_SYSTEM_PROMPT,
+        rag.META_SELF_SYSTEM_PROMPT,
+    ):
+        assert prompt.startswith("Ты — ассистент по базе знаний.")
+        assert not prompt.startswith("Ты — ассистент по базе знаний пользователя")
+    assert "Не говори «ваша база знаний»" in rag.GROUNDING_GUARD
 
 
 def test_smalltalk_skips_retrieval_but_keeps_a_system_turn(monkeypatch):
@@ -1299,6 +1362,61 @@ def test_failed_context_resolution_returns_question_without_retrieval(monkeypatc
     assert ctx.answer_override == rag_pipeline.CONTEXT_CLARIFICATION_ANSWER
     assert ctx.sources == []
     assert seen == [], "сбой разрешения контекста не должен включать широкий поиск"
+
+
+def test_first_turn_russian_fincert_enricher_uses_canonical_search(monkeypatch):
+    hit = _frag(1, text="Fincert-enricher обогащает входящие сообщения.")
+    hit.update(
+        path="Продукты/Fincert/Fincert-enricher.md",
+        title="Пользовательская инструкция. Fincert-enricher",
+    )
+    seen = _install_retrieval(monkeypatch, [hit])
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {"grades": [{"id": 1, "score": 5}]},
+    )
+
+    ctx = _build("Что такое финцерт энричер?")
+
+    assert seen[0][0] == "Что такое Fincert Enricher?"
+    assert ctx.standalone_question == "Что такое Fincert Enricher?"
+    assert ctx.context_subject == "Fincert Enricher"
+    assert [source["path"] for source in ctx.sources] == [hit["path"]]
+
+
+def test_explicit_russian_product_switches_from_old_active_topic(monkeypatch):
+    arm = _frag(1, text="Описание АРМ DS.")
+    arm.update(path="Продукты/АРМ DS/Описание.md", title="АРМ DS")
+    fincert = _frag(2, text="Fincert-enricher обогащает входящие сообщения.")
+    fincert.update(
+        path="Продукты/Fincert/Fincert-enricher.md",
+        title="Fincert-enricher",
+    )
+    seen = _install_retrieval(monkeypatch, [arm, fincert])
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {
+            "intent": "context_clarification",
+            "clarification_question": "Какой инструмент имеется в виду?",
+            "scope": "document",
+        }
+        if _is_condense(prompt)
+        else {"grades": [{"id": 1, "score": 5}]},
+    )
+    history = [
+        {"role": "user", "content": "Что такое АРМ DS?"},
+        {"role": "assistant", "content": "АРМ DS — рабочее место."},
+    ]
+
+    ctx = _build(
+        "А что такое финцерт энричер?",
+        history,
+        active_context={"subject": "АРМ DS"},
+    )
+
+    assert seen[0][0] == "А что такое Fincert Enricher?"
+    assert ctx.context_subject == "Fincert Enricher"
+    assert [source["path"] for source in ctx.sources] == [fincert["path"]]
 
 
 def test_active_topic_filters_other_tools_from_configuration_answer(monkeypatch):

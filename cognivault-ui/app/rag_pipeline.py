@@ -855,9 +855,112 @@ _CONTEXT_GENERIC_TOKENS = {
 }
 
 
+# Canonical product-name aliases used before retrieval and when comparing an
+# active topic with source paths.  These are phonetic spellings, not ordinary
+# translations: users naturally type «финцерт энричер» while Confluence keeps
+# ``Fincert-enricher``.  Longer/more specific rules come first so a compound
+# name is replaced atomically and cannot collapse to its parent product.
+_TECHNICAL_NAME_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(
+            r"(?<![\w])фин[цс]ерт(?:а|е|ом|у)?[\s-]+"
+            r"энричер(?:а|е|ом|у)?(?![\w])",
+            re.IGNORECASE,
+        ),
+        "Fincert Enricher",
+    ),
+    (
+        re.compile(
+            r"(?<![\w])(?:fincert[\s-]+)?enricher(?![\w])",
+            re.IGNORECASE,
+        ),
+        "Fincert Enricher",
+    ),
+    (
+        re.compile(r"(?<![\w])фин[цс]ерт(?:а|е|ом|у)?(?![\w])", re.IGNORECASE),
+        "Fincert",
+    ),
+    (re.compile(r"(?<![\w])яфк(?:а|е|у|ой|и)?(?![\w])", re.IGNORECASE), "YAFCA"),
+    (
+        re.compile(r"(?<![\w])дата[\s-]+лайн(?:е|э)?дж(?:а|е|у|ем)?(?![\w])", re.IGNORECASE),
+        "Data Lineage",
+    ),
+    (
+        re.compile(r"(?<![\w])фич(?:е|а|ер)[\s-]+стор(?:а|е|ом|у)?(?![\w])", re.IGNORECASE),
+        "Feature Store",
+    ),
+    (
+        re.compile(r"(?<![\w])бит[\s-]?бакет(?:а|е|ом|у)?(?![\w])", re.IGNORECASE),
+        "Bitbucket",
+    ),
+    (re.compile(r"(?<![\w])марксман(?:а|е|ом|у)?(?![\w])", re.IGNORECASE), "Marksman"),
+    (
+        re.compile(r"(?<![\w])дженерал[\s-]+апи(?![\w])", re.IGNORECASE),
+        "General API",
+    ),
+    (re.compile(r"(?<![\w])бмпф(?![\w])", re.IGNORECASE), "BMPF"),
+    (
+        re.compile(r"(?<![\w])арм[\s-]+(?:ди[\s-]*эс|дс)(?![\w])", re.IGNORECASE),
+        "АРМ DS",
+    ),
+    (re.compile(r"(?<![\w])гига[\s-]?чат(?![\w])", re.IGNORECASE), "GigaChat"),
+    (re.compile(r"(?<![\w])клик[\s-]?хаус(?![\w])", re.IGNORECASE), "ClickHouse"),
+    (re.compile(r"(?<![\w])постгрес(?:а|е|ом|у)?(?![\w])", re.IGNORECASE), "PostgreSQL"),
+    (re.compile(r"(?<![\w])кубернетес(?:а|е|ом|у)?(?![\w])", re.IGNORECASE), "Kubernetes"),
+    (re.compile(r"(?<![\w])квадрант(?:а|е|ом|у)?(?![\w])", re.IGNORECASE), "Qdrant"),
+)
+
+_CANONICAL_TECHNICAL_NAMES = tuple(
+    sorted(
+        {canonical for _, canonical in _TECHNICAL_NAME_RULES},
+        key=len,
+        reverse=True,
+    )
+)
+
+# Some tools are documented across sibling pages under their parent product.
+# Scoping Fincert Enricher to pages whose title literally contains "Enricher"
+# would hide its Playground/CLI validation instructions.  The parent still
+# prevents cross-product mixing; the grader decides which Fincert page answers.
+_TECHNICAL_SUBJECT_PARENTS = {"Fincert Enricher": "Fincert"}
+
+
+def _replace_technical_names(value: Any) -> tuple[str, list[str]]:
+    text = str(value or "")
+    found: list[str] = []
+    for pattern, canonical in _TECHNICAL_NAME_RULES:
+        text, count = pattern.subn(canonical, text)
+        if count and canonical not in found:
+            found.append(canonical)
+    return text, found
+
+
+def canonicalize_technical_names(value: Any) -> str:
+    """Replace Russian phonetic product spellings with indexed names."""
+    return _replace_technical_names(value)[0]
+
+
+def transliterated_technical_subject(value: Any) -> str | None:
+    """Return one unambiguous canonical product explicitly named by an alias."""
+    normalized, names = _replace_technical_names(value)
+    if not names:
+        return None
+    # A mixed-script comparison such as «финцерт и YAFCA» must not inherit the
+    # one alias we happened to replace. Detect other already-canonical names,
+    # but do not turn ordinary English questions into a new routing mechanism.
+    for canonical in _CANONICAL_TECHNICAL_NAMES:
+        if re.search(
+            rf"(?<![\w]){re.escape(canonical)}(?![\w])",
+            normalized,
+            re.IGNORECASE,
+        ) and not any(canonical.casefold() in name.casefold() for name in names):
+            names.append(canonical)
+    return names[0] if len(names) == 1 else None
+
+
 def _context_subject(value: Any) -> str | None:
     """Canonical topic name declared by condense, bounded for later filtering."""
-    text = " ".join(str(value or "").strip().split())
+    text = " ".join(canonicalize_technical_names(value).strip().split())
     if not text or len(text) > 160 or len(text.split()) > 12:
         return None
     return text
@@ -889,8 +992,8 @@ def _same_context_token(left: str, right: str) -> bool:
 
 def text_mentions_context_subject(text: str, subject: str) -> bool:
     """Whether a shortened subject in ``text`` overlaps the canonical name."""
-    text_tokens = _context_tokens(str(text or ""))
-    subject_tokens = _context_tokens(str(subject or ""))
+    text_tokens = _context_tokens(canonicalize_technical_names(text))
+    subject_tokens = _context_tokens(canonicalize_technical_names(subject))
     return bool(
         text_tokens
         and subject_tokens
@@ -904,13 +1007,18 @@ def text_mentions_context_subject(text: str, subject: str) -> bool:
 
 def source_matches_context_subject(subject: str, source: dict[str, Any]) -> bool:
     """Require every significant canonical-subject token in source identity."""
-    wanted = _context_tokens(str(subject or ""))
+    wanted = _context_tokens(canonicalize_technical_names(subject))
     if not wanted:
         return False
     identity = " ".join(
         str(source.get(key) or "") for key in ("title", "path", "section_path")
     )
-    available = _context_tokens(identity)
+    canonical_subject = canonicalize_technical_names(subject)
+    canonical_identity = canonicalize_technical_names(identity)
+    parent = _TECHNICAL_SUBJECT_PARENTS.get(canonical_subject)
+    if parent and text_mentions_context_subject(canonical_identity, parent):
+        return True
+    available = _context_tokens(canonical_identity)
     return all(
         any(_same_context_token(term, token) for token in available)
         for term in wanted
@@ -932,7 +1040,7 @@ def infer_context_subject(
     needs one deterministic bootstrap.  The chosen title/path component must
     overlap the question; generic page names alone never establish a topic.
     """
-    query_tokens = _context_tokens(str(question or ""))
+    query_tokens = _context_tokens(canonicalize_technical_names(question))
     if not query_tokens:
         return None
     scored: dict[str, int] = {}

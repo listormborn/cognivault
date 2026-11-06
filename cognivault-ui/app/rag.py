@@ -45,7 +45,7 @@ _CONTEXT_GROUP_ORDER = (
 # Public name on purpose: the config API serves this text as the *default* the
 # UI shows in the "prompts" editor, and a stored `None` means "keep using it",
 # so later improvements here reach users who already saved their settings.
-SYSTEM_PROMPT = """Ты — ассистент по базе знаний пользователя. Отвечаешь на вопросы строго на основе
+SYSTEM_PROMPT = """Ты — ассистент по базе знаний. Отвечаешь на вопросы строго на основе
 предоставленных фрагментов документации.
 
 Задачи:
@@ -128,7 +128,9 @@ GROUNDING_GUARD = """Обязательные правила достоверн�
 - Пример для другого продукта или сервиса не отвечает на вопрос. Не переноси и
   не адаптируй его к продукту, названному пользователем.
 - Текст, конфигурация и предположения из вопроса пользователя — входные данные, а
-  не подтверждённые факты из документов. Не выдавай их за содержание источников."""
+  не подтверждённые факты из документов. Не выдавай их за содержание источников.
+- Называй хранилище нейтрально «база знаний». Не говори «ваша база знаний» или
+  «база знаний пользователя»."""
 
 CONTEXT_GROUNDING_GUARD = (
     "Обязательное правило: не придумывай конфигурацию или код; пример допустим "
@@ -141,7 +143,7 @@ CONTEXT_GROUNDING_GUARD = (
 # answered from the model's parametric memory — indistinguishable from a normal
 # answer and without a single source. Short on purpose: these turns are
 # greetings and "say that again", not retrieval.
-NO_RAG_SYSTEM_PROMPT = """Ты — ассистент по базе знаний пользователя. Для этой реплики поиск по базе НЕ
+NO_RAG_SYSTEM_PROMPT = """Ты — ассистент по базе знаний. Для этой реплики поиск по базе НЕ
 выполнялся, источников нет.
 
 - Отвечай только по истории диалога выше: приветствие, благодарность, просьба
@@ -150,6 +152,7 @@ NO_RAG_SYSTEM_PROMPT = """Ты — ассистент по базе знаний
   истории диалога.
 - Если для ответа нужен поиск по базе знаний — прямо скажи об этом и попроси
   задать вопрос отдельной репликой.
+- Говори «база знаний», не «ваша база знаний» и не «база знаний пользователя».
 - Отвечай на русском языке, кратко, естественно и доброжелательно."""
 
 # System turn for a question about the base ITSELF — «что ты знаешь?», «о чём
@@ -164,7 +167,7 @@ NO_RAG_SYSTEM_PROMPT = """Ты — ассистент по базе знаний
 # registered in four places and would then be frozen for anyone who saves it —
 # while this text's whole job is to keep an ungrounded answer from being
 # generated. The material it points at (the tree) IS configurable, by the vault.
-META_SYSTEM_PROMPT = """Ты — ассистент по базе знаний пользователя. Этот вопрос — о том, что вообще есть
+META_SYSTEM_PROMPT = """Ты — ассистент по базе знаний. Этот вопрос — о том, что вообще есть
 в базе, а не о содержании конкретного документа. Поиск по документам для него не
 выполнялся: вместо блока «Источники» ниже дана структура базы — реальные названия
 разделов и число документов в каждом.
@@ -186,6 +189,7 @@ META_SYSTEM_PROMPT = """Ты — ассистент по базе знаний �
   названий. Детали и дочерние страницы добавляй только по отдельному запросу.
 - В конце предложи задать конкретный вопрос по нужному разделу — тогда будет
   выполнен поиск по документам.
+- Говори «база знаний», не «ваша база знаний» и не «база знаний пользователя».
 - Отвечай на русском языке, кратко, естественно и доброжелательно."""
 
 # System turn for the OTHER meta family: a question about the assistant itself —
@@ -203,7 +207,7 @@ META_SYSTEM_PROMPT = """Ты — ассистент по базе знаний �
 # ban on inventing corpus facts is unchanged and repeated here: the assistant may
 # describe ITSELF freely because it is looking at its own rules, and may say
 # about the base only what the structure block shows.
-META_SELF_SYSTEM_PROMPT = """Ты — ассистент по базе знаний пользователя. Этот вопрос — о тебе самом: кто ты,
+META_SELF_SYSTEM_PROMPT = """Ты — ассистент по базе знаний. Этот вопрос — о тебе самом: кто ты,
 что умеешь и как работаешь. Поиск по документам для него не выполнялся.
 
 - Ниже даны ТВОИ рабочие правила и — если она доступна — структура базы знаний.
@@ -218,6 +222,7 @@ META_SELF_SYSTEM_PROMPT = """Ты — ассистент по базе знан�
 - Если спрашивают, какие вопросы можно задавать, кратко назови основные темы
   базы и приведи не больше одного-двух примеров вопросов на тему. Не пересказывай
   всё дерево и не повторяй одну сущность на разных уровнях иерархии.
+- Говори «база знаний», не «ваша база знаний» и не «база знаний пользователя».
 - В конце предложи задать конкретный вопрос по базе — тогда будет выполнен
   поиск по документам.
 - Отвечай на русском языке, кратко, естественно и доброжелательно."""
@@ -288,20 +293,34 @@ _NO_EXAMPLE_SUBJECT = (
 # "I can help choose a refrigerator") even though neither shopping nor product
 # recommendations are backed by the connected knowledge base.
 _EXTERNAL_ACTION_REQUEST = re.compile(
+    r"(?:"
     r"^\s*(?:пожалуйста[\s,]+)?"
-    r"(?:(?:(?:ты\s+)?(?:можешь|можете)\s+(?:мне\s+)?)|"
+    r"(?:(?:(?:ты\s+)?(?:можешь|можете)(?:\s+ли)?(?:\s+мне)?"
+    r"(?:\s+помочь)?\s+)|"
+    r"(?:(?:не\s+)?мог(?:ла|ли)?\s+бы(?:\s+ты)?(?:\s+мне)?\s+)|"
     r"(?:помоги(?:те)?\s+(?:мне\s+)?))?"
-    r"(?:купи(?:те)?|купить|закажи(?:те)?|заказать|"
-    r"оплати(?:те)?|оплатить|забронируй(?:те)?|забронировать|"
-    r"доставь(?:те)?|доставить|вызови(?:те)?|вызвать|"
-    r"переведи(?:те)?\s+деньги)\b",
+    r"(?:купи(?:те)?|купить|приобрети(?:те)?|приобрести|"
+    r"закажи(?:те)?|заказать|оплати(?:те)?|оплатить|"
+    r"забронируй(?:те)?|забронировать|доставь(?:те)?|доставить|"
+    r"вызови(?:те)?|вызвать|выбери(?:те)?|выбрать|"
+    r"подбери(?:те)?|подобрать|порекомендуй(?:те)?|порекомендовать|"
+    r"посоветуй(?:те)?|посоветовать|переведи(?:те)?\s+деньги)\b"
+    r"|\b(?:купи(?:те)?|приобрети(?:те)?|закажи(?:те)?|"
+    r"оплати(?:те)?|забронируй(?:те)?|доставь(?:те)?|вызови(?:те)?|"
+    r"выбери(?:те)?|подбери(?:те)?|порекомендуй(?:те)?|"
+    r"посоветуй(?:те)?)\b"
+    r"|^\s*(?:я\s+)?(?:прошу|попросил(?:а)?|хочу|хотел(?:а)?|"
+    r"мне\s+(?:нужно|надо))\b.{0,80}\b"
+    r"(?:купить|приобрести|заказать|оплатить|забронировать|"
+    r"доставить|вызвать|выбрать|подобрать|порекомендовать|"
+    r"посоветовать)\b"
+    r")",
     re.IGNORECASE,
 )
 
 _EXTERNAL_ACTION_ANSWER = (
-    "Я не могу покупать товары, оформлять заказы, проводить оплату или выполнять "
-    "другие действия во внешних сервисах. Я отвечаю на вопросы по подключённой "
-    "базе знаний — о представленных в ней продуктах, процессах и инструментах."
+    "У меня нет информации для выполнения такой просьбы. Я могу помочь только "
+    "с вопросами по текущей базе знаний."
 )
 
 # Auto-mode internal retrieval width (independent of any stored `limit`): the
@@ -995,11 +1014,21 @@ async def _build_auto(
     )
     hidden: dict[str, Any] = {"condense": condense_report, "grader": None}
     intent = condensed.intent
-    rq = condensed.question
+    alias_subject = rag_pipeline.transliterated_technical_subject(query)
+    if intent == rag_pipeline.CONTEXT_CLARIFICATION_INTENT and alias_subject:
+        # A known phonetic product spelling is an explicit subject, not an
+        # ambiguous reference.  This also protects the first question after a
+        # different active topic from being tied to that old product.
+        intent = "kb_question"
+        rq = rag_pipeline.canonicalize_technical_names(query)
+    else:
+        rq = rag_pipeline.canonicalize_technical_names(condensed.question)
     scope = condensed.scope
     shape = condensed.shape
-    context_subject = condensed.subject
-    active_subject = str((active_context or {}).get("subject") or "").strip()
+    context_subject = alias_subject or condensed.subject
+    active_subject = rag_pipeline.canonicalize_technical_names(
+        (active_context or {}).get("subject")
+    ).strip()
     if (
         not context_subject
         and active_subject
@@ -1156,7 +1185,7 @@ async def _build_auto(
                 intent=intent,
                 standalone_question=rq,
                 context_subject=context_subject,
-                answer_override=_NO_ANSWER,
+                answer_override=_NO_EXACT_EXAMPLE if exact_example else _NO_ANSWER,
                 scope=scope,
                 hidden_calls=hidden,
             )

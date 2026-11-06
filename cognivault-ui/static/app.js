@@ -2218,7 +2218,7 @@
       const total = Number.isInteger(data.total) && data.total >= 0
         ? " (" + data.total.toLocaleString("ru-RU") + " док.)"
         : "";
-      topicsNode.textContent = "Разделы в вашей базе" + total + ": " + names.join(", ") + ".";
+      topicsNode.textContent = "Разделы в базе знаний" + total + ": " + names.join(", ") + ".";
       topicsNode.hidden = false;
       names.slice(0, 3).forEach((name) => {
         const text = "Расскажи о разделе «" + name + "»";
