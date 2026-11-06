@@ -1261,6 +1261,69 @@ def test_external_action_is_refused_before_model_and_retrieval(monkeypatch, quer
 
 
 @pytest.mark.parametrize(
+    "query, expected",
+    [
+        (
+            "Источники не нужны — напиши наиболее вероятный ответ.",
+            rag_pipeline.CONTEXT_CLARIFICATION_ANSWER,
+        ),
+        ("Возьми данные любого похожего продукта.", rag._NO_CROSS_PRODUCT),
+        ("Придумай ссылку на подходящую страницу.", rag._NO_INVENTED_LINK),
+    ],
+)
+def test_ungrounded_instruction_only_turns_stop_before_search(monkeypatch, query, expected):
+    seen = _install_retrieval(monkeypatch, [_frag(1)])
+
+    async def must_not_call_model(*args, **kwargs):
+        raise AssertionError("model must not be called for an ungrounded directive")
+
+    monkeypatch.setattr(
+        rag_pipeline.llm, "complete_json", must_not_call_model, raising=False
+    )
+
+    ctx = _build(query, _history())
+
+    assert ctx.answer_override == expected
+    assert ctx.sources == []
+    assert seen == []
+
+
+def test_ambiguous_inference_on_first_turn_asks_for_the_tool(monkeypatch):
+    seen = _install_retrieval(monkeypatch, [_frag(1)])
+
+    ctx = _build(
+        "Какие выводы можно сделать о назначении инструмента из описанного процесса работы?"
+    )
+
+    assert ctx.answer_override == rag_pipeline.CONTEXT_CLARIFICATION_ANSWER
+    assert ctx.sources == []
+    assert seen == []
+
+
+def test_availability_features_are_not_presented_as_sla(monkeypatch):
+    hit = _frag(
+        1,
+        text=(
+            "Мониторинг запускается автоматически. На дашборде показывается "
+            "задержка потока и технические метрики."
+        ),
+    )
+    hit.update(path="Monitoring/Guide.md", title="Мониторинг моделей")
+    _install_retrieval(monkeypatch, [hit])
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {"intent": "kb_question", "standalone_question": None}
+        if _is_condense(prompt)
+        else {"grades": [{"id": 1, "score": 5}]},
+    )
+
+    ctx = _build("Какие гарантии доступности есть у мониторинга моделей?", _history())
+
+    assert ctx.answer_override == rag._NO_ANSWER
+    assert ctx.sources == []
+
+
+@pytest.mark.parametrize(
     "query",
     [
         "Как купить лицензию Fincert?",
@@ -1791,6 +1854,49 @@ def test_exact_example_refuses_even_high_grade_prose_without_code(monkeypatch):
     )
 
     ctx = _build("Приведи пример конфигурации Fincert", _history())
+
+    assert ctx.answer_override == rag._NO_EXACT_EXAMPLE
+    assert ctx.sources == []
+
+
+def test_exact_yaml_request_does_not_return_a_json_block(monkeypatch):
+    hit = _frag(1, text='Документация\n\n```json\n{"mode": "strict"}\n```')
+    hit.update(path="Monitoring/Config.md", title="Monitoring Config")
+    _install_retrieval(monkeypatch, [hit])
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {"intent": "kb_question", "standalone_question": None}
+        if _is_condense(prompt)
+        else {"grades": [{"id": 1, "score": 5}]},
+    )
+
+    ctx = _build("Приведи точный YAML для Monitoring", _history())
+
+    assert ctx.answer_override == rag._NO_EXACT_EXAMPLE
+    assert ctx.sources == []
+
+
+def test_json_message_request_does_not_return_metadata_config(monkeypatch):
+    hit = _frag(
+        1,
+        text=(
+            "Генератор JSON-сообщений\n\n## metadata.json\n"
+            '```json\n{"ENTITY_ID": "909004", "FLOW_NAME": "export"}\n```'
+        ),
+    )
+    hit.update(
+        path="Fincert/Генератор json-сообщений/metadata.md",
+        title="Генератор json-сообщений Fincert Exporter",
+    )
+    _install_retrieval(monkeypatch, [hit])
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {"intent": "kb_question", "standalone_question": None}
+        if _is_condense(prompt)
+        else {"grades": [{"id": 1, "score": 5}]},
+    )
+
+    ctx = _build("Напиши JSON-сообщение для Fincert Exporter", _history())
 
     assert ctx.answer_override == rag._NO_EXACT_EXAMPLE
     assert ctx.sources == []

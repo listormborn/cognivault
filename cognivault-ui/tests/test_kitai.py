@@ -266,6 +266,51 @@ def test_stream_chat_yields_one_chunk_and_records_finish_reason():
     assert cfg.last_finish_reason == "length"
 
 
+def test_stream_chat_retries_one_final_error_without_detail():
+    transient = {
+        "description": None,
+        "data": {"query_status": "error", "is_final": True},
+    }
+    transport, seen = _recorder(transient, _finished("ответ после повтора"))
+    cfg = _cfg()
+
+    async def collect():
+        return [
+            chunk
+            async for chunk in kitai.stream_chat(
+                [{"role": "user", "content": "?"}], cfg, transport=transport
+            )
+        ]
+
+    assert asyncio.run(collect()) == ["ответ после повтора"]
+    assert sum(1 for request in seen if request.url.path.endswith("/query/model")) == 2
+
+
+def test_stream_chat_does_not_retry_permanent_model_error():
+    permanent = {
+        "description": None,
+        "data": {
+            "query_status": "error",
+            "is_final": True,
+            "error": {"status": 400, "message": "unknown model"},
+            "response_code": 400,
+        },
+    }
+    transport, seen = _recorder(permanent)
+
+    async def collect():
+        return [
+            chunk
+            async for chunk in kitai.stream_chat(
+                [{"role": "user", "content": "?"}], _cfg(), transport=transport
+            )
+        ]
+
+    with pytest.raises(KitaiQueryFailed):
+        asyncio.run(collect())
+    assert sum(1 for request in seen if request.url.path.endswith("/query/model")) == 1
+
+
 def test_complete_json_parses_the_models_object():
     payload = '{"intent": "kb_question", "answer_shape": "list"}'
     transport, _ = _recorder(_finished(payload))

@@ -460,8 +460,16 @@ def test_rag_log_index_rereads_the_file_when_a_turn_appears(tmp_path):
     assert index.get("c2") is not None
 
 
-def test_rag_log_index_load_returns_none_when_absent(tmp_path):
-    assert RagLogIndex.load(str(tmp_path / "нет.jsonl")) is None
+def test_rag_log_index_load_tracks_a_file_created_after_start(tmp_path):
+    """Лог нового пользователя создаётся первым ходом уже после старта eval."""
+    path = tmp_path / "новый.jsonl"
+    index = RagLogIndex.load(str(path))
+
+    assert len(index) == 0
+    assert index.get("c1") is None
+
+    path.write_text(json.dumps(_log_record(chat_id="c1")) + "\n", encoding="utf-8")
+    assert index.get("c1") is not None
 
 
 def test_metadata_fallback_marks_itself_approximate_and_fails_on_backend_error():
@@ -838,9 +846,15 @@ def test_failed_samples_stay_out_of_every_average():
     assert report["coverage"]["faithfulness_ru"] == 1
     assert report["dispersion"]["faithfulness_ru"]["n"] == 1
     assert report["aggregate"][RETRIEVAL_KEY] == 1.0
+    assert report["failure_breakdown"] == {
+        "context": 1,
+        "answer_backend": 0,
+        "other": 0,
+    }
 
     text = render_report_md(report)
     assert "упало и исключено из средних: 1" in text
+    assert "получение контекста: 1" in text
     assert "Упавшие пары (1)" in text
     assert "пустой ответ бэкенда" in text
 
@@ -855,6 +869,22 @@ def test_report_marks_approximate_runs():
     )
     assert fallback["approximate"] is True
     assert "ПРИБЛИЖЁННЫЙ ПРОГОН" in render_report_md(fallback)
+
+    failed_fallback = _report(
+        "failed-fallback",
+        0.8,
+        samples=[
+            _sample(
+                "s1",
+                0.8,
+                context_origin="metadata",
+                context_count=0,
+                failed=True,
+                error="context: пустой ответ бэкенда",
+            )
+        ],
+    )
+    assert failed_fallback["approximate"] is True
 
 
 def test_report_shouts_when_retrieval_hit_is_measured_below_chunk_level():

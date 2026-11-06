@@ -1751,6 +1751,7 @@
       option.textContent = dataset.name + " · " + dataset.rows + " вопросов · " + origin;
       option.dataset.rows = String(dataset.rows || 0);
       option.dataset.withGroundTruth = String(dataset.with_ground_truth || 0);
+      option.dataset.explicitOutcomes = String(dataset.explicit_outcomes || 0);
       dom.evalDataset.appendChild(option);
     });
     if ([...dom.evalDataset.options].some((option) => option.value === selected)) {
@@ -1770,6 +1771,14 @@
     }
     const rows = parseInt(option.dataset.rows || "0", 10);
     const withTruth = parseInt(option.dataset.withGroundTruth || "0", 10);
+    const explicitOutcomes = parseInt(option.dataset.explicitOutcomes || "0", 10);
+    if (explicitOutcomes < rows) {
+      dom.evalDatasetInfo.textContent =
+        "Ожидаемый исход задан явно для " + explicitOutcomes + " из " + rows +
+        ". Добавьте колонку «Ожидаемый исход» (ответ / отказ / мета), иначе " +
+        "false_refusal и разбиение отчёта могут быть неверными.";
+      return;
+    }
     dom.evalDatasetInfo.textContent = withTruth < rows
       ? "Эталонные ответы: " + withTruth + " из " + rows + ". Метрики по ground_truth будут неполными."
       : "Эталонные ответы заполнены для всех " + rows + " вопросов.";

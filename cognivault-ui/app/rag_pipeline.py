@@ -173,8 +173,18 @@ _TECHNICAL_ARTIFACT = re.compile(
     r"команд\w*|скрипт\w*|манифест\w*|сообщен\w*|payload\w*)\b",
     re.IGNORECASE,
 )
+_SERVICE_LEVEL_REQUEST = re.compile(
+    r"\b(?:sla|гаранти\w*\s+доступност\w*|уровень\s+доступност\w*|"
+    r"аптайм\w*|uptime)\b",
+    re.IGNORECASE,
+)
+_SERVICE_LEVEL_EVIDENCE = re.compile(
+    r"\b(?:sla|гаранти\w*\s+доступност\w*|уровень\s+доступност\w*|"
+    r"аптайм\w*|uptime|доступност\w*\s+не\s+менее\s+\d)\b",
+    re.IGNORECASE,
+)
 _FENCED_EXAMPLE = re.compile(
-    r"(?ms)^```[^\n]*\n.*?^```[ \t]*$"
+    r"(?ms)^```(?P<lang>[^\n]*)\n.*?^```[ \t]*$"
 )
 _SUBJECT_TOKEN = re.compile(r"[a-zа-яё0-9]+(?:[-_.][a-zа-яё0-9]+)*", re.IGNORECASE)
 _EXAMPLE_GENERIC_PREFIXES = (
@@ -381,6 +391,79 @@ def first_fenced_example(text: str) -> str | None:
     """
     match = _FENCED_EXAMPLE.search(str(text or ""))
     return match.group(0).strip() if match else None
+
+
+def requested_example_formats(question: str) -> set[str]:
+    """Explicit code formats named by the user, normalised to fence labels."""
+    text = str(question or "").casefold()
+    formats: set[str] = set()
+    if re.search(r"\bya?ml\b", text):
+        formats.update({"yaml", "yml"})
+    if re.search(r"\bjson\b", text):
+        formats.add("json")
+    if re.search(r"\bsql\b", text):
+        formats.add("sql")
+    return formats
+
+
+def _example_artifact_matches(match: re.Match[str], text: str, question: str) -> bool:
+    """Check the requested artefact kind, not just its serialization format."""
+    query = str(question or "").casefold()
+    prefix = text[max(0, match.start() - 600) : match.start()].casefold()
+    language = (match.group("lang") or "").strip().casefold().split()
+    body = match.group(0).split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
+    if re.search(r"\b(?:сообщен\w*|payload\w*)\b", query):
+        message_hits = [
+            found.start()
+            for found in re.finditer(r"\b(?:сообщен\w*|messages?|payload\w*|тело\s+запроса)\b", prefix)
+        ]
+        config_hits = [
+            found.start()
+            for found in re.finditer(r"\b(?:metadata|метаинформац\w*|конфигурац\w*|config)\b", prefix)
+        ]
+        if not message_hits or (config_hits and max(config_hits) > max(message_hits)):
+            return False
+
+    if re.search(r"\bкоманд\w*\b", query):
+        shell_languages = {"bash", "sh", "shell", "console", "powershell", "cmd"}
+        looks_shell = bool(language and language[0] in shell_languages)
+        looks_command = bool(re.match(r"^(?:\$\s*)?[\w./-]+(?:\s+[-\w./=]+)+", body))
+        if not looks_shell and not looks_command:
+            return False
+
+    return True
+
+
+def matching_fenced_example(text: str, question: str) -> str | None:
+    """Return a verbatim example only when its format matches the request.
+
+    A JSON block is useful evidence for a JSON question, but it is not an exact
+    YAML example.  Previously the first fence won regardless of its language,
+    which produced the visibly wrong ``Приведи точный YAML`` → `````json`````
+    answer in the q1 report.
+    """
+    requested = requested_example_formats(question)
+    source_text = str(text or "")
+    for match in _FENCED_EXAMPLE.finditer(source_text):
+        if requested:
+            language = (match.group("lang") or "").strip().casefold().split()
+            if not language or language[0] not in requested:
+                continue
+        if not _example_artifact_matches(match, source_text, question):
+            continue
+        return match.group(0).strip()
+    return None
+
+
+def requires_explicit_service_level(question: str) -> bool:
+    """Whether answering requires an explicit SLA/availability guarantee."""
+    return bool(_SERVICE_LEVEL_REQUEST.search(str(question or "")))
+
+
+def has_explicit_service_level(text: str) -> bool:
+    """Features and monitoring intervals are not availability guarantees."""
+    return bool(_SERVICE_LEVEL_EVIDENCE.search(str(text or "")))
 
 
 def example_subject_terms(question: str) -> set[str]:

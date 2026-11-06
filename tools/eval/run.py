@@ -705,10 +705,13 @@ class RagLogIndex:
         return cls(parse_jsonl(text))
 
     @classmethod
-    def load(cls, path: str) -> "RagLogIndex | None":
-        """Открыть лог; ``None`` — файла нет (значит, будет фолбэк)."""
-        if not os.path.exists(path):
-            return None
+    def load(cls, path: str) -> "RagLogIndex":
+        """Открыть живой индекс, даже если UI ещё не создал файл лога.
+
+        Для нового пользователя ``rag_log.jsonl`` появляется только после
+        первого завершённого хода. Если вернуть здесь ``None``, весь прогон
+        навсегда переключится на приближённое восстановление контекста.
+        """
         index = cls(path=path)
         index.refresh()
         return index
@@ -2215,10 +2218,34 @@ def build_report(
     for sample in samples:
         key = str(sample.get("context_origin", "none") or "none")
         origins[key] = origins.get(key, 0) + 1
+    # Неудавшийся metadata-фолбэк тоже делает прогон приближённым. Раньше 62
+    # ошибки получения контекста могли соседствовать с ``approximate: false``.
     approximate = any(
-        sample.get("context_origin") not in (None, "rag_log")
-        for sample in ok
-        if sample.get("context_count")
+        sample.get("context_origin") not in (None, "none", "rag_log")
+        for sample in samples
+    )
+    failure_breakdown = {
+        "context": sum(
+            1
+            for sample in failed
+            if str(sample.get("error") or "").startswith("context:")
+        ),
+        "answer_backend": sum(
+            1
+            for sample in failed
+            if not str(sample.get("error") or "").startswith("context:")
+            and re.search(
+                r"(?:KITAI|GIGACHAT|chat transport|HTTP \d+)",
+                str(sample.get("error") or ""),
+                re.I,
+            )
+        ),
+    }
+    failure_breakdown["other"] = max(
+        0,
+        len(failed)
+        - failure_breakdown["context"]
+        - failure_breakdown["answer_backend"],
     )
     return {
         "label": label,
@@ -2242,6 +2269,7 @@ def build_report(
             # …и отдельно — урезанный уже капом САМОГО судьи (другая причина).
             JUDGE_CLIP_KEY: sum(1 for s in ok if is_judge_clipped(s)),
         },
+        "failure_breakdown": failure_breakdown,
         # Состав оценённых пар: судейские средние покрывают только `answerable`,
         # и без этих двух чисел прогон на 39 вопросах молча сравнится с
         # прогоном на 30.
@@ -2889,6 +2917,14 @@ def render_report_md(report: dict[str, Any], *, max_rows: int = 200) -> str:
         f"- **упало и исключено из средних: {counts.get('failed', 0)}** "
         "(сбой чата или недоступный текст контекста — не качество)"
     )
+    failures = report.get("failure_breakdown") or {}
+    if any(failures.values()):
+        lines.append(
+            "  - получение контекста: "
+            f"{failures.get('context', 0)}; модель/транспорт ответа: "
+            f"{failures.get('answer_backend', 0)}; прочее: "
+            f"{failures.get('other', 0)}"
+        )
     lines.extend(_render_judge_health(report))
     lines.append(f"- {_judge_calls_line((report.get('run_params') or {}).get('judge_calls_by_metric'))}")
     lines.append(
@@ -3594,12 +3630,10 @@ def _resolve_rag_log(args: argparse.Namespace) -> RagLogIndex | None:
         or os.environ.get("COGNIVAULT_UI_RAG_LOG")
         or _default_rag_log()
     )
+    existed = os.path.exists(path)
     index = RagLogIndex.load(path)
-    if index is None:
-        _log(
-            f"ВНИМАНИЕ: {path} не найден — контекст будет восстанавливаться из "
-            "метаданных, прогон помечен ПРИБЛИЖЁННЫМ (--rag-log укажет путь)"
-        )
+    if not existed:
+        _log(f"rag-log: {path} ещё не создан; индекс ждёт первую запись UI")
     else:
         _log(f"rag-log: {path} (записей на старте: {len(index)})")
     return index

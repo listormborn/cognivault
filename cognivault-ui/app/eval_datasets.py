@@ -30,6 +30,37 @@ _GROUND_TRUTH_HEADERS = {
     "эталонный ответ",
     "ожидаемый ответ",
 }
+_EXPECTED_OUTCOME_HEADERS = {
+    "expected_outcome",
+    "expected outcome",
+    "ожидаемый исход",
+    "тип ожидаемого ответа",
+}
+_EXPECTED_REFUSAL_HEADERS = {
+    "expected_refusal",
+    "expected refusal",
+    "ожидается отказ",
+}
+_KIND_HEADERS = {"kind", "тип", "тип вопроса"}
+_SOURCE_PATH_HEADERS = {"source_path", "source path", "путь источника"}
+_SECTION_PATH_HEADERS = {"section_path", "section path", "раздел источника"}
+_SOURCE_CHUNK_HEADERS = {
+    "source_chunk_index",
+    "source chunk index",
+    "индекс фрагмента",
+}
+_ACCEPTED_HEADERS = {"accepted", "принят", "использовать"}
+
+_OUTCOME_ALIASES = {
+    "answer": "answer",
+    "ответ": "answer",
+    "refusal": "refusal",
+    "отказ": "refusal",
+    "нет информации": "refusal",
+    "meta": "meta",
+    "мета": "meta",
+    "мета-вопрос": "meta",
+}
 
 
 class DatasetError(ValueError):
@@ -50,6 +81,19 @@ def _normal_header(value: Any) -> str:
     return re.sub(r"\s+", " ", _text(value).lower()).strip()
 
 
+def _bool(value: Any, *, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = _text(value).lower()
+    if not text:
+        return default
+    if text in {"1", "true", "yes", "y", "да", "+"}:
+        return True
+    if text in {"0", "false", "no", "n", "нет", "-"}:
+        return False
+    return default
+
+
 def _safe_id(value: Any, index: int) -> str:
     raw = _text(value)
     if raw.endswith(".0") and raw[:-2].isdigit():
@@ -64,8 +108,15 @@ def _normalise_row(row: dict[str, Any], index: int) -> dict[str, Any]:
         raise DatasetError(f"строка {index}: пустой вопрос")
 
     category = _text(row.get("category")) or "unclassified"
-    expected = _text(row.get("expected_outcome")).lower()
-    expected_refusal = bool(row.get("expected_refusal"))
+    expected_raw = _text(row.get("expected_outcome")).lower()
+    explicit_marker = row.get("expected_outcome_explicit")
+    expected_explicit = (
+        explicit_marker
+        if isinstance(explicit_marker, bool)
+        else bool(expected_raw or _text(row.get("expected_refusal")))
+    )
+    expected = _OUTCOME_ALIASES.get(expected_raw, expected_raw)
+    expected_refusal = _bool(row.get("expected_refusal"))
     if not expected:
         expected = "refusal" if expected_refusal or "вне скоупа" in category.lower() else "answer"
     if expected not in {"answer", "refusal", "meta"}:
@@ -81,14 +132,19 @@ def _normalise_row(row: dict[str, Any], index: int) -> dict[str, Any]:
             "question": question,
             "ground_truth": _text(row.get("ground_truth")),
             "kind": _text(row.get("kind"))
-            or ("unanswerable" if expected_refusal else "factual"),
+            or (
+                "unanswerable"
+                if expected_refusal
+                else "meta" if expected == "meta" else "factual"
+            ),
             "category": category,
             "source_path": row.get("source_path") or None,
             "section_path": row.get("section_path") or None,
             "source_chunk_index": row.get("source_chunk_index"),
             "expected_refusal": expected_refusal,
             "expected_outcome": expected,
-            "accepted": row.get("accepted") is not False,
+            "expected_outcome_explicit": expected_explicit,
+            "accepted": _bool(row.get("accepted"), default=True),
         }
     )
     return result
@@ -201,7 +257,17 @@ def _parse_xlsx(content: bytes) -> list[dict[str, Any]]:
     id_col = find(_ID_HEADERS)
     category_col = find(_CATEGORY_HEADERS)
     truth_col = find(_GROUND_TRUTH_HEADERS)
+    outcome_col = find(_EXPECTED_OUTCOME_HEADERS)
+    refusal_col = find(_EXPECTED_REFUSAL_HEADERS)
+    kind_col = find(_KIND_HEADERS)
+    source_col = find(_SOURCE_PATH_HEADERS)
+    section_col = find(_SECTION_PATH_HEADERS)
+    chunk_col = find(_SOURCE_CHUNK_HEADERS)
+    accepted_col = find(_ACCEPTED_HEADERS)
     assert question_col is not None
+
+    def cell(row: list[str], column: int | None) -> str:
+        return row[column] if column is not None and column < len(row) else ""
 
     records: list[dict[str, Any]] = []
     for row in matrix[header_pos + 1 :]:
@@ -209,15 +275,18 @@ def _parse_xlsx(content: bytes) -> list[dict[str, Any]]:
         if not question:
             continue
         raw = {
-            "id": row[id_col] if id_col is not None and id_col < len(row) else "",
+            "id": cell(row, id_col),
             "question": question,
-            "ground_truth": (
-                row[truth_col] if truth_col is not None and truth_col < len(row) else ""
-            ),
-            "category": (
-                row[category_col]
-                if category_col is not None and category_col < len(row)
-                else "unclassified"
+            "ground_truth": cell(row, truth_col),
+            "category": cell(row, category_col) or "unclassified",
+            "expected_outcome": cell(row, outcome_col),
+            "expected_refusal": cell(row, refusal_col),
+            "kind": cell(row, kind_col),
+            "source_path": cell(row, source_col),
+            "section_path": cell(row, section_col),
+            "source_chunk_index": cell(row, chunk_col) or None,
+            "accepted": (
+                cell(row, accepted_col) if accepted_col is not None else True
             ),
         }
         records.append(_normalise_row(raw, len(records) + 1))
@@ -265,14 +334,24 @@ def save_upload(root: Path, filename: str, content: bytes) -> dict[str, Any]:
 def dataset_info(path: Path, *, source: str, label: str | None = None) -> dict[str, Any]:
     rows = 0
     with_truth = 0
+    explicit_outcomes = 0
+    outcomes = {"answer": 0, "refusal": 0, "meta": 0}
     try:
         for line in path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
             rows += 1
             try:
-                if _text(json.loads(line).get("ground_truth")):
+                row = json.loads(line)
+                if _text(row.get("ground_truth")):
                     with_truth += 1
+                if row.get("expected_outcome_explicit") is not False and row.get(
+                    "expected_outcome"
+                ):
+                    explicit_outcomes += 1
+                outcome = _text(row.get("expected_outcome")).lower()
+                if outcome in outcomes:
+                    outcomes[outcome] += 1
             except (json.JSONDecodeError, AttributeError):
                 pass
     except OSError:
@@ -284,6 +363,8 @@ def dataset_info(path: Path, *, source: str, label: str | None = None) -> dict[s
         "source": source,
         "rows": rows,
         "with_ground_truth": with_truth,
+        "explicit_outcomes": explicit_outcomes,
+        "outcomes": outcomes,
     }
 
 

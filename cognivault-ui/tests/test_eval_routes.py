@@ -405,7 +405,45 @@ def test_xlsx_upload_is_converted_without_external_excel_dependency():
     assert rows[0]["id"] == "1"
     assert rows[0]["question"] == "Какая завтра погода?"
     assert rows[0]["expected_outcome"] == "refusal"
+    assert rows[0]["expected_outcome_explicit"] is False
     assert rows[0]["ground_truth"] == ""
+
+
+def _annotated_xlsx() -> bytes:
+    sheet = """<?xml version="1.0" encoding="UTF-8"?>
+    <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+      <sheetData>
+        <row r="1">
+          <c r="A1" t="inlineStr"><is><t>Вопрос</t></is></c>
+          <c r="B1" t="inlineStr"><is><t>Ожидаемый исход</t></is></c>
+          <c r="C1" t="inlineStr"><is><t>Эталонный ответ</t></is></c>
+          <c r="D1" t="inlineStr"><is><t>Путь источника</t></is></c>
+          <c r="E1" t="inlineStr"><is><t>Использовать</t></is></c>
+        </row>
+        <row r="2">
+          <c r="A2" t="inlineStr"><is><t>О чём я могу спросить?</t></is></c>
+          <c r="B2" t="inlineStr"><is><t>мета</t></is></c>
+          <c r="C2" t="inlineStr"><is><t>Краткий список тем.</t></is></c>
+          <c r="D2" t="inlineStr"><is><t>docs/index.md</t></is></c>
+          <c r="E2" t="inlineStr"><is><t>нет</t></is></c>
+        </row>
+      </sheetData>
+    </worksheet>"""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("xl/worksheets/sheet1.xml", sheet)
+    return buffer.getvalue()
+
+
+def test_xlsx_upload_preserves_explicit_eval_annotations():
+    rows = eval_datasets.parse_upload("annotated.xlsx", _annotated_xlsx())
+
+    assert rows[0]["expected_outcome"] == "meta"
+    assert rows[0]["expected_outcome_explicit"] is True
+    assert rows[0]["expected_refusal"] is False
+    assert rows[0]["ground_truth"] == "Краткий список тем."
+    assert rows[0]["source_path"] == "docs/index.md"
+    assert rows[0]["accepted"] is False
 
 
 def test_status_shape_survives_a_run(tmp_path, monkeypatch):

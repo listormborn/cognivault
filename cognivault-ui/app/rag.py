@@ -293,6 +293,42 @@ _NO_EXAMPLE_SUBJECT = (
     "Без этого я не буду искать по всей базе и объединять материалы разных продуктов."
 )
 
+_NO_CROSS_PRODUCT = (
+    "Уточните, пожалуйста, для какого именно продукта или инструмента нужен ответ. "
+    "Я не буду переносить данные из другого, только похожего продукта."
+)
+
+# Instruction-only turns have no subject to retrieve. Sending them into search
+# made generic words such as «источники» and «ответ» select arbitrary pages and
+# turn the corpus tree into a fabricated answer (q1: «Источники не нужны —
+# напиши наиболее вероятный ответ»). These guards are intentionally narrow and
+# full-turn based: a real question that merely contains the same phrase still
+# reaches grounded retrieval.
+_UNSCOPED_GUESS_REQUEST = re.compile(
+    r"^\s*(?:источники\s+не\s+нужны\s*[-—,:;]*\s*)?"
+    r"(?:напиши\s+)?(?:наиболее\s+)?вероятн\w*\s+ответ\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+_CROSS_PRODUCT_REQUEST = re.compile(
+    r"^\s*(?:возьми|используй|подставь)\s+(?:данные|пример|параметры)\s+"
+    r"(?:из\s+)?(?:любого\s+)?похож\w+\s+(?:продукта|сервиса|инструмента)\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+_INVENT_LINK_REQUEST = re.compile(
+    r"^\s*(?:придумай|сгенерируй|сочини)\s+(?:ссылку|url)\b.*$",
+    re.IGNORECASE,
+)
+_AMBIGUOUS_FIRST_TURN = re.compile(
+    r"^\s*(?:какие\s+выводы\s+можно\s+сделать\s+)?"
+    r"(?:о\s+)?назначени[ия]\s+(?:этого\s+)?инструмента\s+"
+    r"из\s+описанного\s+процесса\s+работы\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+_NO_INVENTED_LINK = (
+    "Я не буду придумывать ссылку. Уточните название страницы, продукта или "
+    "инструмента — я поищу подтверждённую ссылку в базе знаний."
+)
+
 # Requests to perform a real-world action are outside the assistant's contract.
 # Keep this guard deterministic and before condense/retrieval: asking the model
 # to classify such a request allowed it to improvise an offer (for example,
@@ -1417,6 +1453,24 @@ async def _build_auto(
         or rag_pipeline.infer_context_subject(answer_query, sources)
     )
 
+    # SLA/availability guarantees require explicit evidence. Automatic starts,
+    # dashboards and monitoring intervals are product features, not a promised
+    # service level; letting the answer model infer one produced a false SLA in
+    # q1 even though every individual sentence came from a real document.
+    if rag_pipeline.requires_explicit_service_level(answer_query) and not any(
+        rag_pipeline.has_explicit_service_level(block) for block in blocks
+    ):
+        return RagContext(
+            intent=intent,
+            standalone_question=rq,
+            context_subject=resolved_context_subject,
+            candidates=candidates,
+            grades=grades_meta,
+            answer_override=_NO_ANSWER,
+            scope=scope,
+            hidden_calls=hidden,
+        )
+
     if exact_example:
         # Do not ask the answer model to reproduce or "improve" configuration:
         # that is precisely where plausible invented fields appeared. Return
@@ -1425,7 +1479,7 @@ async def _build_auto(
         for block, source in zip(blocks, sources):
             if not rag_pipeline.source_matches_example_subject(answer_query, source):
                 continue
-            example = rag_pipeline.first_fenced_example(block)
+            example = rag_pipeline.matching_fenced_example(block, answer_query)
             if example:
                 cited = dict(source)
                 cited["n"] = 1
@@ -1642,7 +1696,36 @@ async def build_rag_context(
     / :data:`CONTEXT_REMINDER`, so an untouched (or cleared) setting keeps
     tracking the shipped prompt.
     """
-    if _EXTERNAL_ACTION_REQUEST.search(str(query or "")):
+    query_text = str(query or "")
+    if _UNSCOPED_GUESS_REQUEST.fullmatch(query_text):
+        return RagContext(
+            intent=rag_pipeline.CONTEXT_CLARIFICATION_INTENT,
+            standalone_question=query,
+            answer_override=rag_pipeline.CONTEXT_CLARIFICATION_ANSWER,
+        )
+    if _CROSS_PRODUCT_REQUEST.fullmatch(query_text):
+        return RagContext(
+            intent=rag_pipeline.CONTEXT_CLARIFICATION_INTENT,
+            standalone_question=query,
+            answer_override=_NO_CROSS_PRODUCT,
+        )
+    if _INVENT_LINK_REQUEST.fullmatch(query_text):
+        return RagContext(
+            intent="kb_question",
+            standalone_question=query,
+            answer_override=_NO_INVENTED_LINK,
+        )
+    has_prior_answer = any(
+        isinstance(message, dict) and message.get("role") == "assistant"
+        for message in (messages or [])
+    )
+    if not has_prior_answer and _AMBIGUOUS_FIRST_TURN.fullmatch(query_text):
+        return RagContext(
+            intent=rag_pipeline.CONTEXT_CLARIFICATION_INTENT,
+            standalone_question=query,
+            answer_override=rag_pipeline.CONTEXT_CLARIFICATION_ANSWER,
+        )
+    if _EXTERNAL_ACTION_REQUEST.search(query_text):
         return RagContext(
             intent="out_of_scope",
             standalone_question=query,

@@ -295,6 +295,37 @@ def _failure_detail(data: dict[str, Any]) -> str | None:
     return "; ".join(parts)[:600] or None
 
 
+def _retryable_query_failure(exc: KitaiQueryFailed) -> bool:
+    """Whether one fresh enqueue can recover from a final KitAI error.
+
+    An empty platform detail is treated as transient: this is the production
+    failure seen in q1. Explicit client/configuration failures (4xx, RBAC,
+    unknown model) are not retried; a second identical request would only add
+    latency and load.
+    """
+    detail = str(exc.detail or "").casefold()
+    if not detail:
+        return True
+    transient_codes = (
+        "response_code=500",
+        "response_code=502",
+        "response_code=503",
+        "response_code=504",
+    )
+    if any(marker in detail for marker in transient_codes):
+        return True
+    return any(
+        marker in detail
+        for marker in (
+            "temporar",
+            "timeout",
+            "timed out",
+            "unavailable",
+            "connection termination",
+        )
+    )
+
+
 class QueryResult(NamedTuple):
     """What a finished query yields: the text plus the metadata around it.
 
@@ -545,7 +576,14 @@ async def stream_chat(
     caller reads ``cfg.last_finish_reason`` afterwards, same as for GigaChat.
     """
     llm_trace.reset(cfg, cfg.model)
-    result = await _query(messages, cfg, transport=transport)
+    try:
+        result = await _query(messages, cfg, transport=transport)
+    except KitaiQueryFailed as exc:
+        if not _retryable_query_failure(exc):
+            raise
+        log.warning("kitai: временный сбой ответа — один повтор запроса: %s", exc)
+        await _sleep(min(max(cfg.poll_delay, 0.0), 1.0))
+        result = await _query(messages, cfg, transport=transport)
     llm_trace.stamp(
         cfg,
         finish_reason=result.finish_reason,
