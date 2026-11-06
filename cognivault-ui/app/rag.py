@@ -113,13 +113,19 @@ SYSTEM_PROMPT = """Ты — ассистент по базе знаний. От�
 # model attends to best. Public for the same reason as `SYSTEM_PROMPT`.
 CONTEXT_REMINDER = """Напоминание: отвечай только по источникам выше и ставь [Источник N].
 Начинай сразу с ответа — не с оговорки о том, чего в источниках нет. Пиши естественно,
-доброжелательно и без служебных формулировок о работе системы."""
+доброжелательно и без служебных формулировок о работе системы. Внешнюю тему не
+продолжай и не предлагай по ней помощь."""
 
 # These rules are code-owned rather than part of the editable prompt.  An admin
 # may change tone and answer structure, but cannot accidentally allow the model
 # to manufacture a plausible-looking configuration that is absent from the
 # retrieved evidence.
 GROUNDING_GUARD = """Обязательные правила достоверности (их нельзя отменять):
+- Если просьба или вопрос не относится к продуктам, процессам, инструментам и
+  документации базы знаний, ответь только: «У меня нет информации для выполнения
+  такой просьбы. Я могу помочь только с вопросами по текущей базе знаний.»
+  После этой фразы остановись. Не давай общих советов, не продолжай внешнюю тему
+  и не предлагай выбрать, купить, построить, приготовить или подобрать что-либо.
 - Не создавай примеры конфигурации, кода, YAML, JSON, SQL или команд,
   если точного примера нет в блоке «Источники». В таком случае прямо скажи,
   что готового примера в найденных документах нет.
@@ -314,6 +320,8 @@ _EXTERNAL_ACTION_REQUEST = re.compile(
     r"(?:купить|приобрести|заказать|оплатить|забронировать|"
     r"доставить|вызвать|выбрать|подобрать|порекомендовать|"
     r"посоветовать)\b"
+    r"|\b(?:построй(?:те)?|построить)\s+(?:мне\s+)?"
+    r"(?:дом|дачу|коттедж|гараж|баню|здание)\b"
     r")",
     re.IGNORECASE,
 )
@@ -1014,6 +1022,13 @@ async def _build_auto(
     )
     hidden: dict[str, Any] = {"condense": condense_report, "grader": None}
     intent = condensed.intent
+    if intent == rag_pipeline.OUT_OF_SCOPE_INTENT:
+        return RagContext(
+            intent=intent,
+            standalone_question=query,
+            answer_override=_EXTERNAL_ACTION_ANSWER,
+            hidden_calls=hidden,
+        )
     alias_subject = rag_pipeline.transliterated_technical_subject(query)
     if intent == rag_pipeline.CONTEXT_CLARIFICATION_INTENT and alias_subject:
         # A known phonetic product spelling is an explicit subject, not an

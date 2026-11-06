@@ -1233,6 +1233,7 @@ def _build(query, messages=None, active_context=None, **rcfg):
         "Подбери подходящий телевизор",
         "Помоги забронировать билет",
         "Оплати заказ",
+        "Построй мне дом",
     ],
 )
 def test_external_action_is_refused_before_model_and_retrieval(monkeypatch, query):
@@ -1272,6 +1273,52 @@ def test_external_action_is_refused_before_model_and_retrieval(monkeypatch, quer
 def test_informational_action_question_is_not_blocked(query):
     """Вопрос о документированном процессе — не просьба выполнить действие."""
     assert rag._EXTERNAL_ACTION_REQUEST.search(query) is None
+
+
+def test_condense_out_of_scope_stops_before_retrieval(monkeypatch):
+    """Semantic routing covers external requests not enumerated in regexes."""
+    seen = _install_retrieval(monkeypatch, [_frag(1)])
+    _install_complete_json(
+        monkeypatch,
+        lambda p: {
+            "intent": "out_of_scope",
+            "standalone_question": None,
+            "uses_history": False,
+            "scope": "document",
+            "answer_shape": "fact",
+        },
+    )
+
+    ctx = _build("Составь меню на неделю", _history())
+
+    assert ctx.intent == "out_of_scope"
+    assert ctx.answer_override == rag._EXTERNAL_ACTION_ANSWER
+    assert ctx.sources == []
+    assert seen == []
+
+
+def test_first_turn_keeps_out_of_scope_verdict(monkeypatch):
+    _install_complete_json(
+        monkeypatch,
+        lambda p: {
+            "intent": "out_of_scope",
+            "standalone_question": None,
+            "uses_history": False,
+            "scope": "document",
+            "answer_shape": "fact",
+        },
+    )
+
+    result = asyncio.run(
+        rag_pipeline.condense(
+            "Помоги спланировать отпуск",
+            None,
+            {"condense_first_turn": True},
+            {},
+        )
+    )
+
+    assert result.intent == rag_pipeline.OUT_OF_SCOPE_INTENT
 
 
 def test_prompts_use_neutral_knowledge_base_wording():

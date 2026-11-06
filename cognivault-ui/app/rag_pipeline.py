@@ -132,12 +132,14 @@ CONTEXT_CLARIFICATION_INTENT = "context_clarification"
 CONTEXT_CLARIFICATION_ANSWER = (
     "Уточните, пожалуйста, о каком продукте, сервисе или инструменте идёт речь?"
 )
+OUT_OF_SCOPE_INTENT = "out_of_scope"
 
 _INTENTS = (
     "smalltalk",
     "clarify",
     "kb_question",
     CONTEXT_CLARIFICATION_INTENT,
+    OUT_OF_SCOPE_INTENT,
 )
 _DEFAULT_INTENT = "kb_question"
 
@@ -218,7 +220,15 @@ _CONDENSE_TASKS = """
   "clarify" (просьба переформулировать/уточнить уже сказанное ассистентом),
   "kb_question" (вопрос, требующий поиска по базе знаний),
   "context_clarification" (без уточнения нельзя однозначно определить продукт,
-  сервис, инструмент или документ, о котором спрашивает пользователь).
+  сервис, инструмент или документ, о котором спрашивает пользователь),
+  "out_of_scope" (просьба или вопрос не относится к продуктам, процессам,
+  инструментам и документации базы знаний и требует бытовых, покупательских,
+  туристических, развлекательных, медицинских, юридических либо иных общих
+  знаний или реального действия). Примеры out_of_scope: построить дом, выбрать
+  холодильник, купить товар, составить меню, спланировать отпуск, написать
+  художественный текст. Не предлагай помощь по таким темам. Вопрос о том, как
+  выполнить документированный процесс или настроить инструмент базы, —
+  kb_question, даже если в нём есть слова «выбрать», «создать» или «построить».
 - Если kb_question — переформулируй реплику в самодостаточный поисковый запрос:
   подставь вместо местоимений и отсылок конкретные названия из истории.
   Сохрани все требования пользователя к формату ответа: просьбу привести пример,
@@ -1123,6 +1133,8 @@ def _parse_condense(
             scope,
             shape,
         )
+    if intent == OUT_OF_SCOPE_INTENT:
+        return Condensed(intent, question, scope, shape)
     raw = data.get("standalone_question")
     declared = data.get("uses_history")
     model_uses_history = declared if isinstance(declared, bool) else True
@@ -1297,7 +1309,14 @@ async def condense_with_report(
         has_history=bool(history),
     )
     if first_turn:
-        if parsed.intent != CONTEXT_CLARIFICATION_INTENT:
+        # There is no history to rewrite on an opening turn.  The two safety
+        # verdicts are different: both clarification and out-of-scope must
+        # survive, otherwise «построй дом» falls through to retrieval and
+        # invites the answer model to continue an unrelated topic.
+        if parsed.intent not in (
+            CONTEXT_CLARIFICATION_INTENT,
+            OUT_OF_SCOPE_INTENT,
+        ):
             parsed = Condensed(
                 _DEFAULT_INTENT,
                 question,
