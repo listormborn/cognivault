@@ -59,6 +59,20 @@ def test_app_js_served_fresh_and_is_javascript(client: TestClient) -> None:
     assert again.status_code == 200
 
 
+def test_new_chat_uses_product_question_suggestions(client: TestClient) -> None:
+    script = client.get("/app.js").text
+    for question in (
+        "Что такое мониторинг?",
+        "Как поставить модель на дообучение?",
+        "Как работать с Fincert Enricher?",
+        "Как настроить алертинг?",
+        "Чем отличаются батчевые и стриминговые потоки?",
+        "Как получить доступ к Bitbucket Fincert?",
+    ):
+        assert question in script
+    assert "Расскажи о разделе «" not in script
+
+
 def test_index_html_served_at_root(client: TestClient) -> None:
     """html=True behaviour preserved: GET / returns the SPA HTML shell."""
     resp = client.get("/")

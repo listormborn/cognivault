@@ -2182,6 +2182,14 @@
     const w = dom.thread.querySelector(".welcome");
     if (w) w.remove();
   }
+  const WELCOME_SUGGESTIONS = [
+    "Что такое мониторинг?",
+    "Как поставить модель на дообучение?",
+    "Как работать с Fincert Enricher?",
+    "Как настроить алертинг?",
+    "Чем отличаются батчевые и стриминговые потоки?",
+    "Как получить доступ к Bitbucket Fincert?",
+  ];
   function renderWelcome() {
     dom.thread.textContent = "";
     const w = el("div", "welcome");
@@ -2192,7 +2200,7 @@
     topics.hidden = true;
     w.appendChild(topics);
     const sug = el("div", "suggestions");
-    ["О чем я могу тебя спросить?", "Какие разделы есть в базе знаний?"].forEach((txt) => {
+    WELCOME_SUGGESTIONS.forEach((txt) => {
       const b = el("button", "suggestion", txt);
       b.type = "button";
       b.addEventListener("click", () => { dom.input.value = txt; autoGrow(); dom.input.focus(); });
@@ -2200,10 +2208,10 @@
     });
     w.appendChild(sug);
     dom.thread.appendChild(w);
-    loadWelcomeTopics(w, topics, sug);
+    loadWelcomeTopics(w, topics);
   }
 
-  async function loadWelcomeTopics(welcome, topicsNode, suggestionsNode) {
+  async function loadWelcomeTopics(welcome, topicsNode) {
     // The first render happens before /api/config is loaded. In server mode a
     // catalogue request at that point would be an expected 401, so wait for the
     // authenticated re-render in onLoggedIn().
@@ -2220,17 +2228,6 @@
         : "";
       topicsNode.textContent = "Разделы в базе знаний" + total + ": " + names.join(", ") + ".";
       topicsNode.hidden = false;
-      names.slice(0, 3).forEach((name) => {
-        const text = "Расскажи о разделе «" + name + "»";
-        const button = el("button", "suggestion", text);
-        button.type = "button";
-        button.addEventListener("click", () => {
-          dom.input.value = text;
-          autoGrow();
-          dom.input.focus();
-        });
-        suggestionsNode.appendChild(button);
-      });
     } catch (_) {
       // Greeting is deliberately best-effort: an unavailable/older backend
       // leaves the useful static text and must never show an error toast.
