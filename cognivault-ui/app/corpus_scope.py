@@ -269,6 +269,7 @@ _PATTERNS: tuple[tuple[str, bool, str], ...] = (
     ),
     # --- about the base as a whole ------------------------------------------ #
     ("corpus", False, r"(?:о чем|о чём|про что) (?:эта |эта твоя |твоя )?база(?: знаний)?"),
+    ("corpus", False, r"что такое (?:эта |твоя )?база знаний"),
     ("corpus", False, r"что (?:это )?за база(?: знаний)?"),
     ("corpus", False, r"(?:о|об|про) (?:эту |этой )?баз[еу](?: знаний)?"),
     (
@@ -544,6 +545,35 @@ def match_meta(question: str, *, has_history: bool = False) -> str | None:
     if not kinds:
         return None
     return META_CORPUS if META_CORPUS in kinds else META_ASSISTANT
+
+
+_META_DOCUMENT_FOLLOWUP = re.compile(
+    r"(?:а )?(?:"
+    r"больше (?:документов|материалов|страниц) нет|"
+    r"это (?:все|всё) (?:документы|материалы|страницы)|"
+    r"(?:есть|будут) (?:ли )?еще (?:документы|материалы|страницы)|"
+    r"какие еще (?:документы|материалы|страницы) (?:есть|доступны)|"
+    r"что еще (?:есть|доступно)"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def match_meta_followup(question: str, previous_question: str | None) -> str | None:
+    """Recognise a corpus-completeness follow-up after an explicit meta turn.
+
+    The same phrase after a product question refers to that product and must go
+    through normal history resolution. Requiring the immediately preceding user
+    question to be meta keeps this zero-retrieval branch narrowly scoped.
+    """
+    if not question or not previous_question:
+        return None
+    current = _normalise(question).strip(_STRIP_CHARS).rstrip("?!.;")
+    if not _META_DOCUMENT_FOLLOWUP.fullmatch(current):
+        return None
+    if match_meta(previous_question, has_history=True) is None:
+        return None
+    return META_CORPUS
 
 
 # --------------------------------------------------------------------------- #

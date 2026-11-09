@@ -1339,6 +1339,32 @@ def test_ambiguous_inference_on_first_turn_asks_for_the_tool(monkeypatch):
     assert seen == []
 
 
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Расскажи подробнее",
+        "Что ещё известно?",
+        "Это всё?",
+        "Есть ещё документы?",
+        "Какие ещё детали есть?",
+    ],
+)
+def test_expansion_followups_require_history_resolution(question):
+    assert rag_pipeline.needs_history_resolution(question) is True
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Что такое Fincert Enricher?",
+        "Расскажи про UnknownTool",
+        "Дайте описание инструмента X",
+    ],
+)
+def test_description_requests_are_detected(question):
+    assert rag_pipeline.requests_tool_description(question) is True
+
+
 def test_availability_features_are_not_presented_as_sla(monkeypatch):
     hit = _frag(
         1,

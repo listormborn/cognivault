@@ -425,11 +425,16 @@
         i++; continue;
       }
       // ordered list
-      const ol = line.match(/^\s*\d+[.)]\s+(.*)$/);
+      const ol = line.match(/^\s*(\d+)[.)]\s+(.*)$/);
       if (ol) {
         flushPara();
-        if (listType !== "ol") { closeList(); html += "<ol>"; listType = "ol"; }
-        html += "<li>" + renderInline(ol[1]) + "</li>";
+        const itemNumber = Number(ol[1]);
+        if (listType !== "ol") {
+          closeList();
+          html += itemNumber === 1 ? "<ol>" : '<ol start="' + itemNumber + '">';
+          listType = "ol";
+        }
+        html += '<li value="' + itemNumber + '">' + renderInline(ol[2]) + "</li>";
         i++; continue;
       }
 

@@ -101,6 +101,15 @@ def test_chat_composer_preserves_technical_names(client: TestClient) -> None:
     assert parser.attrs["data-gramm"] == "false"
 
 
+def test_ordered_markdown_lists_preserve_explicit_item_numbers(
+    client: TestClient,
+) -> None:
+    script = client.get("/app.js").text
+    assert r"(\d+)[.)]" in script
+    assert "itemNumber = Number(ol[1])" in script
+    assert "<li value=" in script
+
+
 def test_api_and_healthz_not_no_store(client: TestClient) -> None:
     """API/probe responses must NOT be forced no-store (unchanged behaviour)."""
     for path in ("/api/config", "/healthz"):

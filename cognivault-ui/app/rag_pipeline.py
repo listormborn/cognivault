@@ -275,6 +275,10 @@ _CONDENSE_TASKS = """
   «АРМ DS»), активной темой является самый конкретный объект. В следующем
   зависимом вопросе не заменяй его родительским продуктом и не ищи по соседним
   инструментам этого продукта.
+- Реплики-продолжения «расскажи подробнее», «что ещё известно?», «это всё?»,
+  «есть ещё документы?» и «какие ещё детали?» расширяют только ближайшую активную
+  тему. Восстанови эту тему в standalone_question и не запускай поиск по всей
+  базе. Если ближайшую тему определить нельзя, запроси уточнение.
 - Поле uses_history=true ставь только когда без истории нельзя понять местоимение,
   пропущенный объект или явную отсылку («это», «его», «а как настроить?»,
   «предыдущий ответ»). Для самостоятельного нового вопроса — false.
@@ -838,6 +842,15 @@ _LOCAL_PRONOUN_ANTECEDENT = re.compile(
 _SELF_CONTAINED_DEFINITION = re.compile(
     r"\bчто\s+так(?:ое|ой|ая|ие)\s+\S+", re.IGNORECASE
 )
+_EXPANSION_FOLLOWUP = re.compile(
+    r"^(?:а\s+)?(?:расскажи(?:те)?\s+подробнее|подробнее|"
+    r"что\s+(?:еще|ещё)\s+(?:известно|есть|можешь\s+рассказать)|"
+    r"(?:это\s+)?(?:все|всё)|(?:есть|будут)\s+(?:ли\s+)?(?:еще|ещё)\s+"
+    r"(?:документы|материалы|детали|информация)|"
+    r"какие\s+(?:еще|ещё)\s+(?:документы|материалы|детали)\s+(?:есть|доступны))"
+    r"[?!.]*$",
+    re.IGNORECASE,
+)
 
 # Short procedural questions often omit the object without using a pronoun:
 # «какую конфигурацию нужно заполнить?», «какие параметры обязательны?».  They
@@ -878,6 +891,8 @@ def _needs_history_resolution(question: str) -> bool:
     text = " ".join(str(question or "").strip().split())
     if not text:
         return False
+    if _EXPANSION_FOLLOWUP.fullmatch(text):
+        return True
     # «что известно про кластер и его настройку» is self-contained: «его»
     # points to the noun in the SAME sentence, not to dialogue history.
     if (
@@ -915,6 +930,19 @@ def _needs_history_resolution(question: str) -> bool:
         "какая",
         "какие",
     }
+
+
+_DESCRIPTION_REQUEST = re.compile(
+    r"^\s*(?:что\s+такое|что\s+из\s+себя\s+представляет|"
+    r"расскажи(?:те)?\s+(?:про|о|об)|что\s+(?:ты\s+)?знаешь\s+(?:про|о|об)|"
+    r"(?:дай|дайте)\s+описание)\s+\S+",
+    re.IGNORECASE,
+)
+
+
+def requests_tool_description(question: str) -> bool:
+    """Whether the user explicitly asks what a named object/tool is."""
+    return bool(_DESCRIPTION_REQUEST.search(str(question or "").strip()))
 
 
 def needs_history_resolution(question: str) -> bool:

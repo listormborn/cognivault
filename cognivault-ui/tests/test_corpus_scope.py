@@ -119,6 +119,7 @@ def _local_mode(monkeypatch):
         ("Какие инструменты есть в базе?", "corpus"),
         ("Какие инструменты ты знаешь?", "corpus"),
         ("О каких инструментах есть информация в базе знаний?", "corpus"),
+        ("Что такое база знаний?", "corpus"),
         # --- D4: вопросы о поведении самого ассистента ---------------------- #
         ("Всегда ли ответ в Markdown с заголовками?", "assistant"),
         ("В каком формате ты отвечаешь?", "assistant"),
@@ -873,6 +874,33 @@ def test_meta_question_is_answered_from_the_section_tree(monkeypatch):
     # чего нет в истории диалога, то есть запрещает и рассказ об охвате.
     assert ctx.system_message["content"] == rag.META_SYSTEM_PROMPT
     assert ctx.system_message["content"] != rag.NO_RAG_SYSTEM_PROMPT
+
+
+def test_document_completeness_followup_stays_in_meta_context(monkeypatch):
+    seen = _install_retrieval(monkeypatch)
+    _install_listing(monkeypatch, _corpus())
+    question = "Больше документов нет?"
+    messages = [
+        {"role": "user", "content": "Что такое база знаний?"},
+        {"role": "assistant", "content": "Это документация о работе команды."},
+        {"role": "user", "content": question},
+    ]
+
+    ctx = _build(question, messages=messages)
+
+    assert ctx.intent == "meta"
+    assert ctx.sources == [] and seen == []
+    assert "Структура базы знаний" in ctx.user_message["content"]
+    assert ctx.user_message["content"].endswith(f"Вопрос: {question}")
+
+
+def test_document_followup_after_product_question_is_not_meta():
+    assert (
+        corpus_scope.match_meta_followup(
+            "Больше документов нет?", "Расскажи про Fincert"
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize("question", ["Какие разделы?", "Какие темы?"])

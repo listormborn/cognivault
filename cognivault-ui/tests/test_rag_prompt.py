@@ -586,6 +586,23 @@ def test_no_results_yields_empty_context(monkeypatch):
     )
 
 
+def test_missing_tool_description_has_explicit_non_inventing_answer(monkeypatch):
+    _install_retrieval(monkeypatch, [])
+    ctx = _build("Что такое UnknownTool?", [])
+
+    assert ctx.answer_override == rag._NO_TOOL_DESCRIPTION
+    assert "не найдено описание" in ctx.answer_override
+
+
+def test_prompt_requires_concise_summary_and_stable_numbering():
+    assert "достаточное краткое резюме" in rag.SYSTEM_PROMPT
+    assert "Не пересказывай подряд все найденные фрагменты" in rag.SYSTEM_PROMPT
+    assert "строго «1.», «2.», «3.»" in rag.SYSTEM_PROMPT
+    assert "документация о работе команды" in rag.META_SYSTEM_PROMPT
+    assert "краткое достаточное" in rag.GROUNDING_GUARD
+    assert "явному описанию" in rag.GROUNDING_GUARD
+
+
 def test_prompt_forbids_invented_configuration_examples():
     assert "Не создавай примеры конфигурации" in rag.GROUNDING_GUARD
     assert "точного примера нет" in rag.GROUNDING_GUARD
