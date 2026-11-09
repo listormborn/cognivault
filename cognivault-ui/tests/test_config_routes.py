@@ -1,11 +1,11 @@
-"""Route tests for ``GET`` / ``PUT /api/config`` (per-user settings overrides).
+"""Route tests for shared administrator config + personal UI preferences.
 
 Covers:
-* server mode: a user-editable key round-trips through ``PUT`` → ``GET``;
+* server mode: administrator agent settings round-trip through the shared file;
 * admin-owned keys are dropped and reported in ``ignored``;
 * every value-validation boundary (temperature, max_tokens, grader_threshold,
   strict booleans);
-* tenant isolation: two bearer tokens → two buckets → two config files;
+* all bearer tokens read the same model/RAG/prompt settings;
 * prompt semantics: ``null`` and blank both reset to the built-in prompt;
 * the non-blocking «Источник» warning;
 * auth: ``GET`` stays public, ``PUT`` needs a bearer token in server mode;
@@ -56,8 +56,17 @@ def _user_file(tmp_path, token: str):
     return tmp_path / "data" / "users" / user_bucket(token) / "config.json"
 
 
+def _shared_file(tmp_path):
+    return tmp_path / "data" / "shared" / "config.json"
+
+
 def _stored(tmp_path, token: str) -> dict:
     path = _user_file(tmp_path, token)
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+
+
+def _shared(tmp_path) -> dict:
+    path = _shared_file(tmp_path)
     return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
 
 
@@ -83,7 +92,7 @@ def _put(client: TestClient, body: dict, token: str = TOKEN_A):
 
 
 def test_put_persists_editable_key_and_get_reflects_it(tmp_path, monkeypatch):
-    """A user-editable key survives PUT and comes back on the next GET."""
+    """An admin-editable key survives PUT and comes back on the next GET."""
     _server_mode(monkeypatch, tmp_path)
 
     with TestClient(create_app()) as client:
@@ -93,7 +102,8 @@ def test_put_persists_editable_key_and_get_reflects_it(tmp_path, monkeypatch):
     assert put.status_code == 200
     assert put.json()["gigachat"]["temperature"] == 0.9
     assert get.json()["gigachat"]["temperature"] == 0.9
-    assert _stored(tmp_path, TOKEN_A)["gigachat"]["temperature"] == 0.9
+    assert _shared(tmp_path)["gigachat"]["temperature"] == 0.9
+    assert _stored(tmp_path, TOKEN_A) == {}
 
 
 def test_admin_keys_are_ignored_not_saved(tmp_path, monkeypatch):
@@ -123,7 +133,7 @@ def test_admin_keys_are_ignored_not_saved(tmp_path, monkeypatch):
     assert body["gigachat"]["model_context_tokens"] == 32768
     assert body["gigachat"]["temperature"] == 0.5
 
-    stored = _stored(tmp_path, TOKEN_A)
+    stored = _shared(tmp_path)
     assert stored == {"gigachat": {"temperature": 0.5}}
 
 
@@ -190,6 +200,7 @@ def test_out_of_range_values_are_rejected(tmp_path, monkeypatch, body):
     section, leaf = next(iter(body.items()))
     assert f"{section}.{next(iter(leaf))}" in err["message"]
     assert not _user_file(tmp_path, TOKEN_A).is_file()
+    assert not _shared_file(tmp_path).is_file()
 
 
 @pytest.mark.parametrize(
@@ -220,7 +231,8 @@ def test_boundary_values_are_accepted(tmp_path, monkeypatch, body):
     assert resp.status_code == 200, resp.text
     section, leaf = next(iter(body.items()))
     key, value = next(iter(leaf.items()))
-    assert _stored(tmp_path, TOKEN_A)[section][key] == value
+    stored = _stored(tmp_path, TOKEN_A) if section == "ui" else _shared(tmp_path)
+    assert stored[section][key] == value
 
 
 def test_max_tokens_ceiling_follows_admin_context_window(tmp_path, monkeypatch):
@@ -238,26 +250,41 @@ def test_max_tokens_ceiling_follows_admin_context_window(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# Tenant isolation
+# Shared behaviour settings + personal preferences
 # --------------------------------------------------------------------------- #
 
 
-def test_two_tokens_get_two_isolated_config_files(tmp_path, monkeypatch):
-    """Different bearer tokens bucket to different dirs and never cross-read."""
+def test_admin_change_is_visible_to_every_token(tmp_path, monkeypatch):
+    """The latest shared agent setting is read by every bearer token."""
     _server_mode(monkeypatch, tmp_path)
     assert user_bucket(TOKEN_A) != user_bucket(TOKEN_B)
 
     with TestClient(create_app()) as client:
         _put(client, {"gigachat": {"temperature": 0.1}}, token=TOKEN_A)
-        _put(client, {"gigachat": {"temperature": 1.7}}, token=TOKEN_B)
         a = client.get("/api/config", headers=_auth(TOKEN_A)).json()
         b = client.get("/api/config", headers=_auth(TOKEN_B)).json()
 
     assert a["gigachat"]["temperature"] == 0.1
-    assert b["gigachat"]["temperature"] == 1.7
-    assert _user_file(tmp_path, TOKEN_A) != _user_file(tmp_path, TOKEN_B)
-    assert _stored(tmp_path, TOKEN_A)["gigachat"]["temperature"] == 0.1
-    assert _stored(tmp_path, TOKEN_B)["gigachat"]["temperature"] == 1.7
+    assert b["gigachat"]["temperature"] == 0.1
+    assert _shared(tmp_path)["gigachat"]["temperature"] == 0.1
+    assert not _user_file(tmp_path, TOKEN_A).exists()
+    assert not _user_file(tmp_path, TOKEN_B).exists()
+
+
+def test_themes_remain_personal_while_agent_settings_are_shared(tmp_path, monkeypatch):
+    _server_mode(monkeypatch, tmp_path)
+
+    with TestClient(create_app()) as client:
+        _put(client, {"ui": {"theme": "dark"}}, token=TOKEN_A)
+        _put(client, {"ui": {"theme": "light"}}, token=TOKEN_B)
+        _put(client, {"rag": {"grader_threshold": 5}}, token=TOKEN_A)
+        a = client.get("/api/config", headers=_auth(TOKEN_A)).json()
+        b = client.get("/api/config", headers=_auth(TOKEN_B)).json()
+
+    assert a["ui"]["theme"] == "dark"
+    assert b["ui"]["theme"] == "light"
+    assert a["rag"]["grader_threshold"] == 5
+    assert b["rag"]["grader_threshold"] == 5
 
 
 # --------------------------------------------------------------------------- #
@@ -276,7 +303,7 @@ def test_prompt_null_resets_to_builtin_default(tmp_path, monkeypatch):
 
     assert custom.json()["prompts"]["system"] == "Мой промпт [Источник N]"
     assert reset.json()["prompts"]["system"] == builtin
-    assert _stored(tmp_path, TOKEN_A)["prompts"]["system"] is None
+    assert _shared(tmp_path)["prompts"]["system"] is None
 
 
 def test_blank_prompt_is_stored_as_null(tmp_path, monkeypatch):
@@ -288,7 +315,7 @@ def test_blank_prompt_is_stored_as_null(tmp_path, monkeypatch):
         resp = _put(client, {"prompts": {"context_reminder": "   \n  "}})
 
     assert resp.status_code == 200
-    assert _stored(tmp_path, TOKEN_A)["prompts"]["context_reminder"] is None
+    assert _shared(tmp_path)["prompts"]["context_reminder"] is None
     assert resp.json()["prompts"]["context_reminder"] == builtin
 
 
@@ -364,6 +391,7 @@ def test_rbac_assigns_roles_and_protects_admin_surfaces(tmp_path, monkeypatch):
         admin_put = _put(client, {"gigachat": {"temperature": 0.4}}, TOKEN_A)
         user_put = _put(client, {"gigachat": {"temperature": 0.8}}, TOKEN_B)
         user_theme = _put(client, {"ui": {"theme": "dark"}}, TOKEN_B)
+        user_config = client.get("/api/config", headers=_auth(TOKEN_B))
         user_admin = client.get("/api/admin/collection", headers=_auth(TOKEN_B))
         user_confluence = client.get("/api/confluence/config", headers=_auth(TOKEN_B))
 
@@ -375,8 +403,46 @@ def test_rbac_assigns_roles_and_protects_admin_surfaces(tmp_path, monkeypatch):
     assert user_put.status_code == 403
     assert user_put.json()["error"]["code"] == "FORBIDDEN"
     assert user_theme.status_code == 200
+    assert user_config.json()["gigachat"]["temperature"] == 0.4
+    assert user_config.json()["ui"]["theme"] == "dark"
+    assert _shared(tmp_path)["gigachat"]["temperature"] == 0.4
+    assert _stored(tmp_path, TOKEN_B) == {"ui": {"theme": "dark"}}
     assert user_admin.status_code == 403
     assert user_confluence.status_code == 403
+
+
+def test_legacy_admin_bucket_is_visible_until_shared_config_takes_over(
+    tmp_path, monkeypatch
+):
+    """An upgrade must not lose settings saved by the previous image."""
+    _server_mode(monkeypatch, tmp_path)
+    _enable_rbac(monkeypatch)
+    legacy = _user_file(tmp_path, TOKEN_A)
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(
+        json.dumps(
+            {
+                "gigachat": {"temperature": 0.7},
+                "rag": {"grader_threshold": 4},
+                "ui": {"theme": "dark"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with TestClient(create_app()) as client:
+        before = client.get("/api/config", headers=_auth(TOKEN_B)).json()
+        saved = _put(client, {"gigachat": {"temperature": 1.1}}, TOKEN_A)
+        after = client.get("/api/config", headers=_auth(TOKEN_B)).json()
+
+    assert before["gigachat"]["temperature"] == 0.7
+    assert before["rag"]["grader_threshold"] == 4
+    # An administrator's old personal theme is not propagated to users.
+    assert before["ui"]["theme"] == "auto"
+    assert saved.status_code == 200
+    assert after["gigachat"]["temperature"] == 1.1
+    assert after["rag"]["grader_threshold"] == 4
+    assert _shared(tmp_path) == {"gigachat": {"temperature": 1.1}}
 
 
 def test_enabled_rbac_rejects_missing_admin_hashes(tmp_path, monkeypatch):

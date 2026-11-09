@@ -332,8 +332,8 @@ def server_config() -> dict[str, Any]:
         "gigachat": gigachat,
         "rag": rag,
         # Admin baseline for the prompts: ``None`` = "use the built-in text".
-        # Prompts are user-editable only (no env knob), but the section must
-        # exist here so the shape matches ``load_config``.
+        # Prompts are editable by an administrator in the UI (no env knob), but
+        # the section must exist here so the shape matches ``load_config``.
         "prompts": copy.deepcopy(DEFAULT_CONFIG["prompts"]),
         "ui": {"theme": "auto"},
     }
@@ -343,11 +343,12 @@ def server_config() -> dict[str, Any]:
 # User-editable keys (server mode) — allowlist, filtering, validation
 # --------------------------------------------------------------------------- #
 #
-# In server mode the administrator owns the deployment-wide config (env) and the
-# user owns a small set of behaviour knobs, stored per tenant in
-# ``<UI_DATA_DIR>/users/<bucket>/config.json``. Anything not listed here stays
-# admin-only: base URLs, certificate paths/passphrase, TLS verification, the
-# CogniVault token, the ``env`` mirror settings, and
+# In server mode the administrator owns one deployment-wide set of behaviour
+# knobs, stored in ``<UI_DATA_DIR>/shared/config.json``. Every user reads it on
+# every request. Only explicitly personal preferences (currently the UI theme)
+# remain under ``<UI_DATA_DIR>/users/<bucket>/config.json``. Anything not listed
+# here stays deployment-only: base URLs, certificate paths/passphrase, TLS
+# verification, the CogniVault token, the ``env`` mirror settings, and
 # ``gigachat.model_context_tokens`` (a property of the DEPLOYED model — a wrong
 # value silently breaks history trimming).
 
@@ -380,6 +381,15 @@ USER_EDITABLE_KEYS: tuple[str, ...] = (
     "prompts.system",
     "prompts.context_reminder",
     "ui.theme",
+)
+
+# The UI form and value validators keep one allowlist, while persistence has two
+# scopes.  Agent behaviour is shared; appearance is personal.  Keeping the
+# split explicit prevents a stale user config from silently overriding a new
+# administrator prompt/threshold after rollout.
+PERSONAL_EDITABLE_KEYS: tuple[str, ...] = ("ui.theme",)
+SHARED_ADMIN_KEYS: tuple[str, ...] = tuple(
+    key for key in USER_EDITABLE_KEYS if key not in PERSONAL_EDITABLE_KEYS
 )
 
 # Admin-owned paths, surfaced to the UI as ``locked`` so it can render them
@@ -469,6 +479,34 @@ def filter_user_overrides(
             else:
                 ignored.append(f"{section}.{leaf}")
     return filtered, ignored
+
+
+def _filter_paths(
+    partial: dict[str, Any], allowed_paths: tuple[str, ...]
+) -> dict[str, Any]:
+    """Return only leaves named by ``allowed_paths`` from a nested config."""
+    allowed: dict[str, set[str]] = {}
+    for path in allowed_paths:
+        section, _, leaf = path.partition(".")
+        allowed.setdefault(section, set()).add(leaf)
+    out: dict[str, Any] = {}
+    for section, value in partial.items():
+        if not isinstance(value, dict):
+            continue
+        for leaf, leaf_value in value.items():
+            if str(leaf) in allowed.get(str(section), set()):
+                out.setdefault(str(section), {})[str(leaf)] = leaf_value
+    return out
+
+
+def shared_admin_overrides(partial: dict[str, Any]) -> dict[str, Any]:
+    """Agent/model settings from a validated partial config."""
+    return _filter_paths(partial, SHARED_ADMIN_KEYS)
+
+
+def personal_overrides_from(partial: dict[str, Any]) -> dict[str, Any]:
+    """Per-user preferences from a validated partial config."""
+    return _filter_paths(partial, PERSONAL_EDITABLE_KEYS)
 
 
 class ConfigValueError(ValueError):
@@ -624,36 +662,68 @@ def validate_user_overrides(
 
 
 def user_overrides(paths: AppPaths) -> dict[str, Any]:
-    """Allowlisted per-user overrides, read RAW (no defaults) from ``paths``.
+    """Read all legacy allowlisted overrides from one token bucket.
 
-    Reading raw is load-bearing: a defaults-merged read would carry every
-    unset key along and clobber the administrator's env values on merge.
+    Kept as a compatibility/helper API; active server config now uses only
+    :func:`_personal_overrides` from a user bucket. Reading raw remains
+    load-bearing because defaults would invent overrides that were never saved.
     """
     filtered, _ = filter_user_overrides(_read_raw_config(paths))
     return filtered
 
 
-def effective_config_for(paths: AppPaths | None = None) -> dict[str, Any]:
-    """Active config for one caller: admin env + that user's overrides.
+def shared_config_paths() -> AppPaths:
+    """Deployment-wide mutable config written by administrators."""
+    return AppPaths(root=data_root() / "shared")
 
-    * server mode: :func:`server_config` with the tenant's allowlisted overrides
-      deep-merged on top (``paths=None`` → the admin config alone, e.g. for an
-      unauthenticated ``GET /api/config``);
+
+def _legacy_admin_overrides() -> dict[str, Any]:
+    """Read pre-migration admin bucket(s) as a compatibility baseline.
+
+    Older builds saved settings under the administrator token bucket.  The
+    configured SHA-256 hashes already contain the non-reversible bucket prefix,
+    so the migration needs neither the bearer token nor a directory scan.  The
+    new shared file is merged after this baseline and therefore always wins.
+    """
+    merged: dict[str, Any] = {}
+    for digest in admin_token_hashes():
+        legacy = AppPaths(root=data_root() / "users" / digest[:16])
+        raw = shared_admin_overrides(_read_raw_config(legacy))
+        merged = deep_merge(merged, raw)
+    return merged
+
+
+def _shared_overrides() -> dict[str, Any]:
+    return shared_admin_overrides(_read_raw_config(shared_config_paths()))
+
+
+def _personal_overrides(paths: AppPaths) -> dict[str, Any]:
+    return personal_overrides_from(_read_raw_config(paths))
+
+
+def effective_config_for(paths: AppPaths | None = None) -> dict[str, Any]:
+    """Active config: admin env + shared UI settings + personal preferences.
+
+    * server mode: :func:`server_config`, legacy administrator settings and the
+      shared config are merged for everybody; only personal preferences are
+      read from ``paths``. ``paths=None`` still includes the shared config, so
+      the public pre-auth bootstrap sees the active model/RAG values;
     * local mode: the single config file — the local user IS the administrator.
     """
     if not is_server():
         return load_config(paths)
-    base = server_config()
+    base = deep_merge(server_config(), _legacy_admin_overrides())
+    base = deep_merge(base, _shared_overrides())
     if paths is None:
         return base
-    return deep_merge(base, user_overrides(paths))
+    return deep_merge(base, _personal_overrides(paths))
 
 
 def effective_config() -> dict[str, Any]:
     """Return the active config: env-driven in server mode, file-driven locally.
 
     Request-agnostic wrapper around :func:`effective_config_for` — in server
-    mode it yields the ADMIN config with no per-user overrides. Callers that
+    mode it yields the shared config with no personal overrides. Callers that
     have a request should prefer ``effective_config_for(resolve_paths(request))``.
     """
     return effective_config_for(None)

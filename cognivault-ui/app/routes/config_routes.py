@@ -112,8 +112,8 @@ def _effective_prompts(cfg: dict[str, Any]) -> dict[str, str]:
 def _baseline_config() -> dict[str, Any]:
     """What a "reset to default" lands on.
 
-    Server mode: the administrator's env-driven config (the user's overrides are
-    what gets discarded). Local mode: the shipped ``DEFAULT_CONFIG``, since the
+    Server mode: the administrator's env-driven baseline (shared overrides are
+    what reset discards). Local mode: the shipped ``DEFAULT_CONFIG``, since the
     file on disk IS the user's own state.
     """
     return settings.server_config() if settings.is_server() else DEFAULT_CONFIG
@@ -160,9 +160,9 @@ def _public_config(cfg: dict[str, Any]) -> dict[str, Any]:
     """Secret-free view of the effective config for server mode.
 
     No token, no cert paths, no passphrase, no base_urls — model params, the
-    user-editable RAG knobs, the effective prompt texts, plus the metadata the
-    UI needs to render the form (``defaults`` for reset, ``readonly`` prompts,
-    ``locked`` admin paths, non-blocking ``warnings``).
+    administrator-editable RAG knobs, the effective prompt texts, plus the
+    metadata the UI needs to render the form (``defaults`` for reset,
+    ``readonly`` prompts, ``locked`` admin paths, non-blocking ``warnings``).
 
     Every path in :data:`app.settings.USER_EDITABLE_KEYS` must be readable back
     here — a key the user can PUT but never GET is a setting that silently
@@ -220,8 +220,8 @@ async def get_config(request: Request) -> dict[str, Any]:
     """Return the config for the UI.
 
     Public in both modes (no auth). SERVER mode returns a SAFE subset (no
-    secrets) with the caller's own overrides applied when a bearer token is
-    present; LOCAL mode returns the full effective config plus ``mode: local``.
+    secrets) with shared administrator settings and the caller's personal theme;
+    LOCAL mode returns the full effective config plus ``mode: local``.
     """
     if settings.is_server():
         return _public_config(settings.effective_config_for(_optional_paths(request)))
@@ -232,14 +232,13 @@ async def get_config(request: Request) -> dict[str, Any]:
 async def put_config(
     request: Request, partial: dict[str, Any], _token: str = Depends(get_token)
 ) -> Any:
-    """Persist a partial config for the CALLER and return the new effective view.
+    """Persist config at its proper scope and return the effective view.
 
-    Server mode writes only the allowlisted keys
-    (:data:`app.settings.USER_EDITABLE_KEYS`) into the caller's own
-    ``config.json``; admin-owned keys are dropped and reported back in
-    ``ignored``. Local mode keeps its historical behaviour — the single user is
-    the administrator, so the whole body is written to the global file — but the
-    editable values go through the same validation.
+    In server mode administrators write model/RAG/prompt settings to the shared
+    deployment file, while ``ui.theme`` stays in the caller's personal file.
+    Consequently every user sees an administrator change on the next request,
+    without copying config files between token buckets. Local mode keeps its
+    historical single-file behaviour.
     """
     if settings.is_server() and get_role(request) != ROLE_ADMIN:
         # Theme is a harmless personal preference exposed outside the admin-only
@@ -270,16 +269,28 @@ async def put_config(
             detail=repr(exc.value),
         )
 
-    to_save = normalized if settings.is_server() else deep_merge(partial, normalized)
+    if settings.is_server():
+        shared = (
+            settings.shared_admin_overrides(normalized)
+            if get_role(request) == ROLE_ADMIN
+            else {}
+        )
+        personal = settings.personal_overrides_from(normalized)
+        try:
+            if shared:
+                save_config(shared, settings.shared_config_paths())
+            if personal:
+                save_config(personal, paths)
+        except ConfigError as exc:
+            return _error(400, "CONFIG_INVALID", str(exc))
+        body = _public_config(settings.effective_config_for(paths))
+        body["ignored"] = ignored
+        return body
+    to_save = deep_merge(partial, normalized)
     try:
         saved = save_config(to_save, paths)
     except ConfigError as exc:
         return _error(400, "CONFIG_INVALID", str(exc))
-
-    if settings.is_server():
-        body = _public_config(settings.effective_config_for(paths))
-        body["ignored"] = ignored
-        return body
     body = _local_config(saved)
     body["ignored"] = []
     return body
