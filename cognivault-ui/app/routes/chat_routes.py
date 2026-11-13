@@ -443,7 +443,10 @@ async def chat(request: Request) -> Any:
     if not isinstance(messages, list) or not messages:
         return _error(400, "BAD_REQUEST", "messages обязательны")
 
-    use_rag = bool(body.get("rag", False))
+    # Search is a product invariant, not a per-request option.  Keep accepting
+    # the legacy `rag` field for old browser bundles, but deliberately ignore
+    # both false and a missing value so no client can bypass the knowledge base.
+    use_rag = True
     chat_id = str(body.get("chat_id") or "") or _new_chat_id()
 
     # Per-request identity/context: which CogniVault + which history bucket.

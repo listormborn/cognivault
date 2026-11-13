@@ -778,7 +778,7 @@ def test_chat_falls_back_to_default_prompts(monkeypatch, tmp_path):
     assert rag.CONTEXT_REMINDER in sent[-1]["content"]
 
 
-def test_chat_without_rag_keeps_plain_history(monkeypatch, tmp_path):
+def test_missing_rag_flag_still_searches_knowledge_base(monkeypatch, tmp_path):
     captured = _install_chat(monkeypatch, tmp_path, [_hit(1)])
     messages = [{"role": "user", "content": "просто вопрос"}]
 
@@ -786,7 +786,12 @@ def test_chat_without_rag_keeps_plain_history(monkeypatch, tmp_path):
         resp = client.post("/api/chat", json={"messages": messages})
 
     assert resp.status_code == 200
-    assert captured[0] == [{"role": "user", "content": "просто вопрос"}]
+    sent = captured[0]
+    assert sent[0]["role"] == "system"
+    assert rag.GROUNDING_GUARD in sent[0]["content"]
+    assert sent[-1]["role"] == "user"
+    assert sent[-1]["content"].startswith("Источники:")
+    assert sent[-1]["content"].endswith("Вопрос: просто вопрос")
 
 
 def test_chat_trims_history_but_never_the_context_message(monkeypatch, tmp_path):

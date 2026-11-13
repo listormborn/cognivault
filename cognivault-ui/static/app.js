@@ -12,7 +12,6 @@
     role: null,            // "admin" | "user" after /api/whoami
     chatId: null,          // current conversation id (null = fresh)
     messages: [],          // visible turns: { role, content, sources?, rag? }
-    rag: true,             // RAG toggle
     streaming: false,      // a chat request is in flight
     abort: null,           // AbortController for current chat stream
     tokenVisible: false,   // masked token field state
@@ -60,8 +59,6 @@
     // chat
     stream: $("stream"),
     thread: $("thread"),
-    ragSwitch: $("rag-switch"),
-    ragSublabel: $("rag-sublabel"),
     input: $("composer-input"),
     sendBtn: $("send-btn"),
     // drawer
@@ -709,9 +706,6 @@
   // read-only, so the drawer shows a real form instead of static text.
   function applyServerConfig() {
     const c = state.config || {};
-    const rag = c.rag || {};
-    state.rag = rag.default_on !== false;
-    applyRagUI();
     applyTheme(getServerTheme());
     bindTuningForm();
   }
@@ -735,11 +729,6 @@
     const env = c.env || {};
     if (dom.cfgPipIndex) dom.cfgPipIndex.value = env.pip_index_url || "";
     if (dom.cfgPipToken) dom.cfgPipToken.value = env.pip_token || "";
-
-    // RAG defaults
-    const rag = c.rag || {};
-    state.rag = rag.default_on !== false;
-    applyRagUI();
 
     // model / RAG / prompt tuning form
     bindTuningForm();
@@ -862,7 +851,6 @@
   ];
 
   const RAG_FIELDS = [
-    { key: "default_on", id: "cfg-rag-default-on", type: "bool", label: "Поиск по умолчанию", def: true },
     { key: "limit", id: "cfg-rag-limit", type: "int", label: "Фрагментов в ответе" },
     { key: "rerank_candidates", id: "cfg-rag-rerank-candidates", type: "int", label: "Кандидатов на отбор" },
     { key: "grader_enabled", id: "cfg-rag-grader-enabled", type: "bool", label: "Оценка релевантности" },
@@ -2179,19 +2167,6 @@
   }
 
   /* ============================ CHAT ============================ */
-  function applyRagUI() {
-    dom.ragSwitch.setAttribute("aria-checked", String(state.rag));
-    dom.ragSublabel.textContent = state.rag
-      ? "Поиск по базе знаний включён"
-      : "Обычный чат GigaChat";
-    dom.limitWrap = dom.limitWrap || document.getElementById("limit-wrap");
-    if (dom.limitWrap) dom.limitWrap.style.opacity = state.rag ? "1" : ".5";
-  }
-  function toggleRag() {
-    state.rag = !state.rag;
-    applyRagUI();
-  }
-
   function clearWelcome() {
     const w = dom.thread.querySelector(".welcome");
     if (w) w.remove();
@@ -2700,7 +2675,7 @@
 
     const payload = {
       messages: state.messages.map((m) => ({ role: m.role, content: m.content })),
-      rag: state.rag,
+      rag: true,
       chat_id: state.chatId,
     };
 
@@ -2769,7 +2744,7 @@
             // finalize with markdown render, then hyperlink inline citations
             content.innerHTML = renderMarkdown(answer);
             linkifyCitations(content, sourcesData);
-            state.messages.push({ role: "assistant", content: answer, sources: sourcesData, context_chars: contextChars, rag: state.rag });
+            state.messages.push({ role: "assistant", content: answer, sources: sourcesData, context_chars: contextChars, rag: true });
             renderFeedback(bubble, state.chatId, state.messages.length - 1);
             break;
           case "error": {
@@ -2792,7 +2767,7 @@
         if (answer) {
           content.innerHTML = renderMarkdown(answer);
           linkifyCitations(content, sourcesData);
-          state.messages.push({ role: "assistant", content: answer, sources: sourcesData, context_chars: contextChars, rag: state.rag });
+          state.messages.push({ role: "assistant", content: answer, sources: sourcesData, context_chars: contextChars, rag: true });
           // Оборванный ответ тоже логируется сервером (truncated=true) — значит
           // его можно оценить.
           renderFeedback(bubble, state.chatId, state.messages.length - 1);
@@ -2909,7 +2884,6 @@
     dom.newchatBtn.addEventListener("click", newChat);
 
     // composer
-    dom.ragSwitch.addEventListener("click", toggleRag);
     dom.sendBtn.addEventListener("click", sendMessage);
     dom.input.addEventListener("input", autoGrow);
     dom.input.addEventListener("keydown", (e) => {
@@ -3003,7 +2977,7 @@
     document.querySelectorAll("textarea").forEach(preserveTechnicalTerms);
     wireEvents();
     renderWelcome();
-    // config first (drives mode + theme + rag defaults + banner). No auth needed
+    // config first (drives mode + theme + banner). No auth needed
     // for GET /api/config in either mode.
     try {
       state.config = await apiGet("/api/config");

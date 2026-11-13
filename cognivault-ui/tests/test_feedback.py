@@ -542,7 +542,7 @@ def test_request_record_reports_stage_timings(tmp_path, monkeypatch):
 def test_chat_record_and_feedback_share_the_file(tmp_path, monkeypatch):
     """A vote for the answer just produced sits next to its request record."""
     paths = _paths(tmp_path)
-    _install_chat(monkeypatch, paths, sources=[], answer="ответ без RAG")
+    _install_chat(monkeypatch, paths, sources=[], answer="ответ")
     monkeypatch.setattr(feedback_routes, "resolve_paths", lambda request: paths)
 
     with TestClient(create_app()) as client:
@@ -559,7 +559,7 @@ def test_chat_record_and_feedback_share_the_file(tmp_path, monkeypatch):
     assert vote.status_code == 200
     records = _records(paths)
     assert [r["type"] for r in records] == ["request", "feedback"]
-    assert records[0]["rag_used"] is False
+    assert records[0]["rag_used"] is True
     assert records[0]["message_index"] == records[1]["message_index"] == 1
     assert records[0]["chat_id"] == records[1]["chat_id"] == chat_id
 

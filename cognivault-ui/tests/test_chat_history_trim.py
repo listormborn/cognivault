@@ -283,15 +283,18 @@ def test_chat_trims_long_history_before_sending(monkeypatch, tmp_path):
     assert len(roles) % 2 == 0
 
 
-def test_chat_short_history_not_trimmed(monkeypatch, tmp_path):
-    captured = _install_chat_stubs(monkeypatch, tmp_path, rag=False)
+def test_chat_without_rag_flag_still_uses_knowledge_base(monkeypatch, tmp_path):
+    captured = _install_chat_stubs(monkeypatch, tmp_path, rag=True)
     messages = [*_turn(1, 10), {"role": "user", "content": "коротко"}]
 
     with TestClient(create_app()) as client:
         resp = client.post("/api/chat", json={"messages": messages})
 
     assert resp.status_code == 200
-    assert [m["content"] for m in captured[0]] == [m["content"] for m in messages]
+    sent = captured[0]
+    assert sent[0] == {"role": "system", "content": "правила ответа"}
+    assert sent[-1]["content"].endswith("Вопрос: коротко")
+    assert "Источники:" in sent[-1]["content"]
 
 
 def test_chat_sse_event_order_unchanged(monkeypatch, tmp_path):

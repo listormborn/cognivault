@@ -73,6 +73,16 @@ def test_new_chat_uses_product_question_suggestions(client: TestClient) -> None:
     assert "Расскажи о разделе «" not in script
 
 
+def test_rag_cannot_be_disabled_in_the_ui(client: TestClient) -> None:
+    page = client.get("/").text
+    script = client.get("/app.js").text
+
+    assert 'id="rag-switch"' not in page
+    assert 'id="cfg-rag-default-on"' not in page
+    assert "toggleRag" not in script
+    assert "rag: true" in script
+
+
 def test_index_html_served_at_root(client: TestClient) -> None:
     """html=True behaviour preserved: GET / returns the SPA HTML shell."""
     resp = client.get("/")

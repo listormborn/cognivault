@@ -54,15 +54,6 @@
       </div>
       <div class="composer">
         <div class="composer-inner">
-          <div class="compbar">
-            <div class="rag">
-              <button class="switch" id="rag-switch" role="switch" aria-checked="true" aria-label="Поиск по базе знаний"></button>
-              <div class="rag-label">
-                <b>RAG</b>
-                <span id="rag-sublabel">Поиск по базе знаний включён</span>
-              </div>
-            </div>
-          </div>
           <div class="compos-row">
             <textarea class="ta" id="composer-input" rows="1"
               autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
@@ -137,11 +128,6 @@
     <!-- §S Поиск и контекст -->
     <section class="section" id="section-rag" aria-labelledby="s-rag">
       <span class="eyebrow" id="s-rag">Поиск и контекст</span>
-      <div class="checkline">
-        <input type="checkbox" id="cfg-rag-default-on">
-        <label for="cfg-rag-default-on">Включать поиск по базе знаний по умолчанию</label>
-      </div>
-      <small class="hint sub-hint">Каким будет переключатель RAG в новом чате</small>
       <div class="field">
         <label for="cfg-rag-limit">Фрагментов в ответе</label>
         <input class="input" id="cfg-rag-limit" type="number" min="1" step="1" placeholder="8">

@@ -637,16 +637,17 @@ def test_empty_answer_is_flagged_only_without_an_error(tmp_path, monkeypatch):
     assert rec["empty_answer"] is False
 
 
-def test_hidden_calls_are_none_outside_rag_mode(tmp_path, monkeypatch):
+def test_false_rag_flag_cannot_disable_pipeline(tmp_path, monkeypatch):
     paths = _paths(tmp_path)
-    _install(monkeypatch, paths, _kb_ctx())
+    calls = _install(monkeypatch, paths, _kb_ctx())
 
     with TestClient(create_app()) as client:
         client.post("/api/chat", json={"messages": [{"role": "user", "content": "привет"}], "rag": False})
 
     rec = rag_log.read_records(paths)[0]
-    assert rec["hidden_calls"] is None
-    assert rec["rag_used"] is False
+    assert any(call["kind"] == "rag" for call in calls)
+    assert rec["hidden_calls"] == {"condense": None, "grader": None}
+    assert rec["rag_used"] is True
 
 
 # --------------------------------------------------------------------------- #
