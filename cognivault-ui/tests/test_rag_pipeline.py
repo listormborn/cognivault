@@ -1504,15 +1504,75 @@ def test_self_contained_conditions_and_comparisons_do_not_borrow_old_topic(quest
 
 
 @pytest.mark.parametrize(
-    "question",
+    ("question", "subject"),
     [
-        "Что такое Fincert Enricher?",
-        "Расскажи про UnknownTool",
-        "Дайте описание инструмента X",
+        ("Что такое связи?", "связи"),
+        ("Что из себя представляет Мониторинг моделей?", "Мониторинг моделей"),
+        ("Расскажи про финцерт энричер", "Fincert Enricher"),
+        ("Расскажите подробнее о YAFCA", "YAFCA"),
+        ("Что ты знаешь про Data Lineage?", "Data Lineage"),
+        ("Дайте краткое описание инструмента X", "инструмента X"),
+        ("Опиши АРМ ДС", "АРМ DS"),
     ],
 )
-def test_description_requests_are_detected(question):
+def test_description_requests_extract_the_first_turn_subject(question, subject):
     assert rag_pipeline.requests_tool_description(question) is True
+    assert rag_pipeline.description_subject(question) == subject
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Что такое это?",
+        "Расскажи об инструменте",
+        "Что такое связи и как их настроить?",
+    ],
+)
+def test_description_subject_rejects_missing_or_compound_object(question):
+    assert rag_pipeline.description_subject(question) is None
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Что такое связи?",
+        "Расскажи о связях",
+        "Что ты знаешь про связи?",
+    ],
+)
+def test_first_turn_description_uses_the_objects_page_not_parent_catalogue(
+    monkeypatch, query
+):
+    catalogue = _frag(1, text="Библиотеки Feature Store: Связи, YAFCA.")
+    catalogue.update(
+        path="Продукты/Библиотеки Feature Store.md",
+        title="Библиотеки Feature Store",
+    )
+    object_page = _frag(
+        2,
+        text=(
+            "Связи обрабатывают inc- и snp-версии данных и используют фильтры "
+            "Блума в описанном процессе работы."
+        ),
+    )
+    object_page.update(
+        path="Продукты/Библиотеки Feature Store/Связи.md",
+        title="Пользовательская инструкция. Связи",
+        section_path="Процесс работы",
+    )
+    seen = _install_retrieval(monkeypatch, [catalogue, object_page])
+    calls = _install_complete_json(
+        monkeypatch, lambda prompt: {"grades": [{"id": 1, "score": 5}]}
+    )
+
+    ctx = _build(query)
+
+    assert seen[0][0] == query
+    assert ctx.context_subject == "Связи"
+    assert [source["path"] for source in ctx.sources] == [object_page["path"]]
+    assert [candidate["path"] for candidate in ctx.candidates] == [object_page["path"]]
+    assert "процессом работы" in calls[0]
+    assert "список ссылок" in calls[0]
 
 
 def test_availability_features_are_not_presented_as_sla(monkeypatch):

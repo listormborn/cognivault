@@ -69,9 +69,11 @@ SYSTEM_PROMPT = """Ты — ассистент по базе знаний. От�
   ключевых фактов или шагов. Не пересказывай подряд все найденные фрагменты.
   Подробности, полный перечень и внутреннее устройство добавляй только когда
   пользователь явно попросил «подробно», «все», «полный список» или инструкцию.
-- Для определения продукта или инструмента используй только явное описание его
-  назначения в источниках. Не выводи назначение продукта из названий дочерних
-  страниц, API, компонентов или соседних сервисов.
+- Для определения продукта или инструмента используй явное описание либо
+  документированные возможности, задачи и процесс работы САМОГО этого объекта.
+  По таким фактам можно кратко суммировать, что объект делает, даже если в тексте
+  нет шаблонной фразы «X — это». Но одного названия страницы, пункта оглавления,
+  списка ссылок, дочерних API или описания соседнего сервиса недостаточно.
 
 Полнота перечислений:
 - Если спрашивают «какие», «все», «перечисли» — выпиши ВСЕ подходящие элементы из
@@ -152,9 +154,10 @@ GROUNDING_GUARD = """Обязательные правила достоверн�
   не адаптируй его к продукту, названному пользователем.
 - Текст, конфигурация и предположения из вопроса пользователя — входные данные, а
   не подтверждённые факты из документов. Не выдавай их за содержание источников.
-- Определяй назначение продукта или инструмента только по явному описанию в
-  источниках, а не по названиям его страниц, API, компонентов или соседних
-  сервисов.
+- Определяй назначение продукта или инструмента по явному описанию либо по
+  документированным возможностям, задачам и процессу работы САМОГО объекта.
+  Можно кратко суммировать эти факты, но нельзя делать вывод только из названия
+  страницы, оглавления, списка ссылок, дочерних API или соседних сервисов.
 - Если не запрошены подробности или полный перечень, дай краткое достаточное
   резюме и не пересказывай подряд все найденные фрагменты.
 - Каждый шаг последовательности пиши с новой строки и нумеруй как 1., 2., 3.
@@ -1095,6 +1098,7 @@ async def _build_auto(
     limit = int(rcfg.get("rerank_candidates", _RERANK_CANDIDATES))
     budget = _compute_budget(rcfg, gcfg, messages)
     topic_opening_subject = rag_pipeline.topic_opening_subject(query)
+    requested_description_subject = rag_pipeline.description_subject(query)
 
     # 0a. A question about the base itself, recognised by anchored patterns —
     # zero model calls, and therefore the only step that works on the FIRST turn,
@@ -1137,6 +1141,7 @@ async def _build_auto(
     )
     hidden: dict[str, Any] = {"condense": condense_report, "grader": None}
     intent = condensed.intent
+    alias_subject = rag_pipeline.transliterated_technical_subject(query)
     if topic_opening_subject:
         intent = rag_pipeline.TOPIC_OPENING_INTENT
         rq = topic_opening_subject
@@ -1151,7 +1156,6 @@ async def _build_auto(
             hidden_calls=hidden,
         )
     else:
-        alias_subject = rag_pipeline.transliterated_technical_subject(query)
         if intent == rag_pipeline.CONTEXT_CLARIFICATION_INTENT and alias_subject:
             # A known phonetic product spelling is an explicit subject, not an
             # ambiguous reference. This also protects the first question after
@@ -1162,7 +1166,9 @@ async def _build_auto(
             rq = rag_pipeline.canonicalize_technical_names(condensed.question)
         scope = condensed.scope
         shape = condensed.shape
-        context_subject = alias_subject or condensed.subject
+        context_subject = (
+            alias_subject or requested_description_subject or condensed.subject
+        )
     active_subject = rag_pipeline.canonicalize_technical_names(
         (active_context or {}).get("subject")
     ).strip()
@@ -1328,14 +1334,23 @@ async def _build_auto(
     # safer, this avoids spending a hidden model call on similarly named pages
     # from unrelated tools (the common case for «конфигурация» and «пример»).
     if context_subject and scope == corpus_scope.DEFAULT_SCOPE:
-        fragments = [
+        subject_fragments = [
             fragment
             for fragment in fragments
             if rag_pipeline.source_matches_context_subject(
                 context_subject, fragment
             )
         ]
-        if not fragments:
+        if subject_fragments:
+            fragments = subject_fragments
+        elif requested_description_subject:
+            # Some legacy pages describe a tool without carrying its name in
+            # the page identity. Keep them for semantic grading; the grader's
+            # definition rule rejects catalogues/TOCs that merely list a name.
+            # A persisted follow-up topic remains strict below, because widening
+            # that boundary is what mixed unrelated products in prior answers.
+            pass
+        else:
             return RagContext(
                 intent=intent,
                 standalone_question=rq,
@@ -1564,9 +1579,16 @@ async def _build_auto(
             hidden_calls=hidden,
         )
 
+    inferred_context_subject = rag_pipeline.infer_context_subject(
+        answer_query, sources
+    )
+    # A description request often contains an inflected Russian object
+    # («о связях»). Persist the matching page identity («Связи») so subsequent
+    # follow-ups use a clean canonical topic rather than the query's case form.
     resolved_context_subject = (
-        context_subject
-        or rag_pipeline.infer_context_subject(answer_query, sources)
+        inferred_context_subject
+        if requested_description_subject and inferred_context_subject and not alias_subject
+        else context_subject or inferred_context_subject
     )
 
     if topic_opening_subject:

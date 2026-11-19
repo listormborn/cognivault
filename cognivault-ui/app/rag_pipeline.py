@@ -412,6 +412,11 @@ _GRADE_SCALE = """
 2 — смежная тема, конкретной пользы нет
 1 — не связан с вопросом
 
+Для вопроса «что такое X» фрагмент с документированным процессом работы,
+возможностями или задачами самого X содержит ответ, даже если в нём нет фразы
+«X — это»: оцени его на 4–5. Оглавление, каталог или список ссылок, где X только
+упомянут по названию, не описывает X: оцени такой фрагмент не выше 2.
+
 Ответ строго в JSON: {"grades": [{"id": 1, "score": 5}, ...]}
 Отвечай только JSON, без рассуждений и пояснений до или после него."""
 
@@ -1154,17 +1159,66 @@ def _needs_history_resolution(question: str) -> bool:
     }
 
 
-_DESCRIPTION_REQUEST = re.compile(
-    r"^\s*(?:что\s+такое|что\s+из\s+себя\s+представляет|"
-    r"расскажи(?:те)?\s+(?:про|о|об)|что\s+(?:ты\s+)?знаешь\s+(?:про|о|об)|"
-    r"(?:дай|дайте)\s+описание)\s+\S+",
+_DESCRIPTION_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"^\s*что\s+такое\s+(?P<subject>.+?)[?!.]*\s*$",
+        r"^\s*что\s+из\s+себя\s+представляет\s+(?P<subject>.+?)[?!.]*\s*$",
+        r"^\s*расскажи(?:те)?\s+(?:подробнее\s+)?(?:про|о|об)\s+"
+        r"(?P<subject>.+?)[?!.]*\s*$",
+        r"^\s*что\s+(?:ты\s+)?знаешь\s+(?:про|о|об)\s+"
+        r"(?P<subject>.+?)[?!.]*\s*$",
+        r"^\s*(?:дай|дайте)\s+(?:краткое\s+|общее\s+|подробное\s+)?"
+        r"описание\s+(?P<subject>.+?)[?!.]*\s*$",
+        r"^\s*опиши(?:те)?\s+(?P<subject>.+?)[?!.]*\s*$",
+    )
+)
+_DESCRIPTION_COMPOUND = re.compile(
+    r"\b(?:и|а)\s+(?:как|где|когда|зачем|почему|что|каки[ейх])\b",
+    re.IGNORECASE,
+)
+_DESCRIPTION_GENERIC_SUBJECT = re.compile(
+    r"^(?:это|он|она|они|инструмент\w*|продукт\w*|сервис\w*|систем\w*)$",
     re.IGNORECASE,
 )
 
 
+def _description_match(question: str) -> re.Match[str] | None:
+    text = str(question or "").strip()
+    for pattern in _DESCRIPTION_PATTERNS:
+        match = pattern.fullmatch(text)
+        if match:
+            return match
+    return None
+
+
+def description_subject(question: str) -> str | None:
+    """Explicit object named in a first-turn request for a description.
+
+    Condense is normally skipped on the first turn. Extracting the object here
+    gives that turn the same source boundary as a follow-up, so a catalogue that
+    merely lists «Связи» cannot outrank the actual «Связи» documentation.
+    """
+    match = _description_match(question)
+    if not match:
+        return None
+    subject = match.group("subject").strip(" \t«»\"'`“”„.,!?;:-—–")
+    subject = re.sub(r"\s+подробнее$", "", subject, flags=re.IGNORECASE).strip()
+    subject = " ".join(canonicalize_technical_names(subject).split())
+    if (
+        not subject
+        or _DESCRIPTION_GENERIC_SUBJECT.fullmatch(subject)
+        or len(subject) > 160
+        or len(subject.split()) > 12
+        or _DESCRIPTION_COMPOUND.search(subject)
+    ):
+        return None
+    return subject
+
+
 def requests_tool_description(question: str) -> bool:
     """Whether the user explicitly asks what a named object/tool is."""
-    return bool(_DESCRIPTION_REQUEST.search(str(question or "").strip()))
+    return _description_match(question) is not None
 
 
 def needs_history_resolution(question: str) -> bool:
@@ -1383,6 +1437,29 @@ def _context_tokens(value: str) -> list[str]:
 
 def _same_context_token(left: str, right: str) -> bool:
     if left == right:
+        return True
+    # Russian case endings matter for natural questions («о связях») but not
+    # for the identity of a page («Связи»).  Strip only common inflectional
+    # endings and require a four-letter stem; this avoids fuzzy collisions such
+    # as «сервис»/«сервер» while handling связи/связях, поток/потоках, etc.
+    cyrillic = re.compile(r"^[а-яё]+$", re.IGNORECASE)
+    endings = (
+        "иями", "ями", "ами", "ого", "ему", "ому", "ыми", "ими",
+        "иях", "ях", "ах", "ой", "ей", "ам", "ям", "ов", "ев",
+        "ом", "ем", "ы", "и", "а", "я", "у", "ю", "е",
+    )
+
+    def russian_stem(token: str) -> str:
+        if not cyrillic.fullmatch(token):
+            return token
+        for ending in endings:
+            if token.endswith(ending) and len(token) - len(ending) >= 4:
+                return token[: -len(ending)]
+        return token
+
+    left_stem = russian_stem(left)
+    right_stem = russian_stem(right)
+    if left_stem == right_stem and len(left_stem) >= 4:
         return True
     common = 0
     for a, b in zip(left, right):
