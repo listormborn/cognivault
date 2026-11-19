@@ -27,7 +27,7 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app import history, rag, rag_log, settings  # noqa: E402
+from app import history, rag, rag_log, rag_pipeline, settings  # noqa: E402
 from app.config import AppPaths  # noqa: E402
 from app.history import load_chat  # noqa: E402
 from app.main import create_app  # noqa: E402
@@ -212,6 +212,22 @@ def test_smalltalk_generates_without_sources(tmp_path, monkeypatch, intent):
     assert rec["notice"] is None
 
 
+def test_no_rag_prompt_preserves_facts_when_reformatting_an_answer():
+    prompt = rag.NO_RAG_SYSTEM_PROMPT
+
+    assert "измени только форму" in prompt
+    assert "не добавляй новых фактов" in prompt
+    assert "прошлый ответ неверен или не по теме" in prompt
+
+
+def test_grounding_guard_rejects_prompt_injection_and_secret_disclosure():
+    guard = rag.GROUNDING_GUARD
+
+    assert "игнорировать эти правила" in guard
+    assert "системный промпт" in guard
+    assert "нельзя раскрывать само значение секрета" in guard
+
+
 def test_smalltalk_without_system_message_falls_back_to_bare_history(
     tmp_path, monkeypatch
 ):
@@ -293,6 +309,34 @@ def test_answer_override_skips_gigachat(tmp_path, monkeypatch):
     assert by_event["done"]["finish_reason"] == "no_context"
 
     assert [c["kind"] for c in calls] == ["rag"], "stream_chat не должен вызываться"
+
+
+def test_topic_opening_answer_keeps_subject_for_the_next_followup(
+    tmp_path, monkeypatch
+):
+    paths = _paths(tmp_path)
+    chat_id = "topic-opening"
+    answer = (
+        "Давайте поговорим про «АРМ DS». Что именно вас интересует?"
+    )
+    ctx = _ctx(
+        intent=rag_pipeline.TOPIC_OPENING_INTENT,
+        standalone_question="АРМ DS",
+        context_subject="АРМ DS",
+        answer_override=answer,
+    )
+    _install(monkeypatch, paths, ctx)
+
+    with TestClient(create_app()) as client:
+        response = _post(
+            client,
+            [{"role": "user", "content": "Хочу поговорить про АРМ ДС"}],
+            chat_id=chat_id,
+        )
+
+    assert response.status_code == 200
+    assert dict(_parse_sse(response.text))["token"]["text"] == answer
+    assert load_chat(chat_id, paths)["context"] == {"subject": "АРМ DS"}
 
 
 def test_grounded_answer_override_keeps_its_only_source(tmp_path, monkeypatch):

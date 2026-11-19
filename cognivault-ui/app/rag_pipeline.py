@@ -105,6 +105,82 @@ _BATCH_SIZE = 12
 # far higher than the false-negative one (one wasted retrieval).
 _SMALLTALK_MAX_WORDS = 6
 
+# Purely conversational turns must work even on the first message, where the
+# model-based condense step is normally skipped.  Every alternative is anchored
+# to the whole turn: «привет, помоги настроить Fincert» therefore remains a
+# knowledge-base question instead of being swallowed as a greeting.
+_CONVERSATIONAL_TURN = re.compile(
+    r"^(?:(?:привет(?:ствую)?|здравствуй(?:те)?|хай|hello|"
+    r"доб(?:рый|рое)\s+(?:день|утро|вечер))[\s,!.—-]*)?"
+    r"(?:"
+    r"(?:мне\s+)?нужна\s+помощь|"
+    r"(?:можешь|можете|сможешь|сможете)\s+(?:мне\s+)?помочь|"
+    r"помоги(?:те)?(?:\s+мне)?(?:[\s,]+пожалуйста)?|"
+    r"как\s+(?:дела|ты|вы|настроение)|"
+    r"спасибо(?:\s+большое)?|благодарю|пока|до\s+свидания"
+    r")?[\s!?.,]*$",
+    re.IGNORECASE,
+)
+
+
+def is_conversational_turn(question: str) -> bool:
+    """Whether a whole turn is only greeting/general help/chit-chat."""
+    text = " ".join(str(question or "").strip().split())
+    if not text:
+        return False
+    return bool(_CONVERSATIONAL_TURN.fullmatch(text))
+
+
+_TOPIC_OPENING_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"^(?:я\s+)?хочу\s+(?:поговорить|пообщаться|обсудить)\s+"
+        r"(?:про|о|об)\s+(?P<subject>.+)$",
+        r"^(?:я\s+)?хочу\s+обсудить\s+(?P<subject>.+)$",
+        r"^(?:давай|давайте)\s+(?:поговорим|обсудим)\s+"
+        r"(?:про|о|об)\s+(?P<subject>.+)$",
+        r"^(?:давай|давайте)\s+обсудим\s+(?P<subject>.+)$",
+        r"^мне\s+(?:интересно|хочется)\s+(?:узнать|поговорить|обсудить)\s+"
+        r"(?:про|о|об)\s+(?P<subject>.+)$",
+        r"^мне\s+(?:интересно|хочется)\s+обсудить\s+(?P<subject>.+)$",
+        r"^(?:мне\s+)?нужна\s+помощь\s+(?:с|по)\s+(?P<subject>.+)$",
+        r"^(?:я\s+)?хочу\s+разобраться\s+(?:в|с)\s+(?P<subject>.+)$",
+        r"^(?:давай|давайте)\s+(?:начнем|начнём)\s+"
+        r"(?:с\s+(?:темы|продукта|инструмента)\s+|с\s+)?(?P<subject>.+)$",
+        r"^(?:(?:давай|давайте)\s+)?(?:перейдем|перейдём)\s+"
+        r"(?:к|на\s+тему)\s+(?P<subject>.+)$",
+        r"^(?:давай|давайте)\s+(?:про|о|об)\s+(?P<subject>.+)$",
+    )
+)
+_TOPIC_DETAIL_REQUEST = re.compile(
+    r"\b(?:как|где|когда|зачем|почему|что|какие|какой|какая|"
+    r"настроить|запустить|получить|создать|заполнить|подключить)\b",
+    re.IGNORECASE,
+)
+
+
+def topic_opening_subject(question: str) -> str | None:
+    """Return the subject of a turn that only opens a conversation about it.
+
+    A concrete request such as «хочу обсудить, как настроить Fincert» does not
+    match: it already contains an answerable question and must be searched as-is.
+    """
+    text = " ".join(str(question or "").strip().split())
+    for pattern in _TOPIC_OPENING_PATTERNS:
+        match = pattern.fullmatch(text)
+        if not match:
+            continue
+        subject = match.group("subject").strip(" \t«»\"'`“”„.,!?;:-—–")
+        if (
+            not subject
+            or len(subject) > 160
+            or len(subject.split()) > 12
+            or _TOPIC_DETAIL_REQUEST.search(subject)
+        ):
+            return None
+        return " ".join(canonicalize_technical_names(subject).split())
+    return None
+
 # Hard cap on fragments handed to context assembly (matches `rag._MAX_CONTEXT_BLOCKS`).
 _MAX_SELECTED = 5
 
@@ -133,6 +209,7 @@ CONTEXT_CLARIFICATION_ANSWER = (
     "Уточните, пожалуйста, о каком продукте, сервисе или инструменте идёт речь?"
 )
 OUT_OF_SCOPE_INTENT = "out_of_scope"
+TOPIC_OPENING_INTENT = "topic_opening"
 
 _INTENTS = (
     "smalltalk",
@@ -279,6 +356,32 @@ _CONDENSE_TASKS = """
   «есть ещё документы?» и «какие ещё детали?» расширяют только ближайшую активную
   тему. Восстанови эту тему в standalone_question и не запускай поиск по всей
   базе. Если ближайшую тему определить нельзя, запроси уточнение.
+- Если ассистент предложил варианты продолжения, а пользователь выбрал один из
+  них короткой репликой («общее описание», «давай инструкцию», «первый вариант»,
+  «про настройку»), восстанови активную тему и преврати выбор в полный вопрос.
+  Не ищи слова «описание» или «инструкция» по всей базе.
+- Просьбу изменить только форму предыдущего ответа («объясни проще», «короче»,
+  «переформулируй», «повтори», «сделай по шагам/списком/таблицей») классифицируй
+  как "clarify": новый поиск для неё не нужен. Если вместе с такой просьбой
+  назван новый продукт или задан новый содержательный вопрос — это kb_question.
+- Реплики проверки («ты уверен?», «это точно?», «проверь ещё раз», «откуда эта
+  информация?») требуют повторного поиска: восстанови полный предыдущий вопрос,
+  выбери kb_question и uses_history=true. Не отвечай одной только уверенностью.
+- Поправка темы («нет, я про YAFCA», «не Fincert, а YAFCA») заменяет объект в
+  ближайшем предыдущем вопросе, но сохраняет его действие и требования к ответу.
+  Не объединяй старый и новый продукты. Если исходный вопрос восстановить нельзя,
+  запроси уточнение.
+- Короткое согласие с предложением ассистента («да», «давай», «хорошо»,
+  «продолжай») разрешай по ближайшему вопросу или предложенным вариантам. Если
+  непонятно, с чем согласился пользователь, запроси уточнение.
+- Короткую отрицательную оценку прошлого ответа («это не то», «ответ не по теме»,
+  «ты меня не понял») классифицируй как "clarify". Не ищи эти слова в базе и не
+  спорь: попроси кратко указать, что именно нужно исправить. Если пользователь
+  сразу добавил новый содержательный вопрос, обработай его как kb_question.
+- Продолжения «а дальше?», «что потом?», условие без объекта («а если нет
+  доступа?»), ссылка на пункт прошлого ответа («расскажи про второй пункт») и
+  вопрос «в чём разница?» разрешай только по ближайшему контексту. Для сравнения
+  нужны ровно два однозначных объекта; иначе запроси уточнение.
 - Поле uses_history=true ставь только когда без истории нельзя понять местоимение,
   пропущенный объект или явную отсылку («это», «его», «а как настроить?»,
   «предыдущий ответ»). Для самостоятельного нового вопроса — false.
@@ -788,6 +891,8 @@ def _too_substantive_for_smalltalk(question: str) -> bool:
     alone: "объясни попроще, я не понял этот кусок" is a legitimate long
     clarification and still answers from the history.
     """
+    if is_conversational_turn(question):
+        return False
     text = question.strip()
     return "?" in text or len(text.split()) > _SMALLTALK_MAX_WORDS
 
@@ -847,10 +952,114 @@ _EXPANSION_FOLLOWUP = re.compile(
     r"что\s+(?:еще|ещё)\s+(?:известно|есть|можешь\s+рассказать)|"
     r"(?:это\s+)?(?:все|всё)|(?:есть|будут)\s+(?:ли\s+)?(?:еще|ещё)\s+"
     r"(?:документы|материалы|детали|информация)|"
-    r"какие\s+(?:еще|ещё)\s+(?:документы|материалы|детали)\s+(?:есть|доступны))"
+    r"какие\s+(?:еще|ещё)\s+(?:документы|материалы|детали)\s+(?:есть|доступны)|"
+    r"(?:а\s+)?дальше|что\s+(?:дальше|потом)|следующий\s+шаг)"
     r"[?!.]*$",
     re.IGNORECASE,
 )
+
+# Dialogue-control turns do not contain a normal search query of their own.
+# They either transform the preceding answer or select/verify/correct the
+# preceding question.  Keep these matchers anchored: «объясни проще настройку
+# Fincert» is a self-contained KB request, while «объясни проще» is not.
+_ANSWER_REWRITE_REQUEST = re.compile(
+    r"^(?:(?:можешь|можете)\s+)?(?:пожалуйста[,.]?\s+)?(?:"
+    r"объясни(?:те)?\s+(?:проще|понятнее|короче)|"
+    r"скажи(?:те)?\s+(?:проще|понятнее|короче)|"
+    r"переформулируй(?:те)?|повтори(?:те)?|"
+    r"(?:сделай|сделайте|оформи|оформите)\s+(?:это\s+)?"
+    r"(?:короче|проще|понятнее|по\s+шагам|списком|в\s+виде\s+списка|"
+    r"таблицей|в\s+виде\s+таблицы))"
+    r"(?:[,.]?\s+пожалуйста)?[?!.]*$",
+    re.IGNORECASE,
+)
+_DIALOGUE_SELECTION = re.compile(
+    r"^(?:(?:давай|давайте|хочу)\s+)?(?:"
+    r"(?:с\s+)?(?:обще(?:е|го)|кратк(?:ое|ого)|подробн(?:ое|ого))\s+"
+    r"описани(?:е|я)|"
+    r"(?:общая|краткая|подробная)\s+информация|"
+    r"инструкци(?:ю|я)|настройк(?:у|а)|доступ|"
+    r"первый\s+вариант|второй\s+вариант|последний\s+вариант|"
+    r"(?:про|о)\s+(?:настройку|доступ|конфигурацию|инструкцию))"
+    r"[?!.]*$",
+    re.IGNORECASE,
+)
+_VERIFICATION_FOLLOWUP = re.compile(
+    r"^(?:а\s+)?(?:ты\s+)?(?:"
+    r"уверен(?:а)?|это\s+точно|точно|"
+    r"проверь(?:те)?\s+(?:это\s+)?(?:еще|ещё)\s+раз|"
+    r"перепроверь(?:те)?(?:\s+это)?|"
+    r"откуда\s+(?:эта\s+)?информаци(?:я|и)|"
+    r"на\s+чем\s+основан\s+(?:этот\s+)?ответ)"
+    r"[?!.]*$",
+    re.IGNORECASE,
+)
+_TOPIC_CORRECTION_FOLLOWUP = re.compile(
+    r"^(?:нет[,.]?\s+)?(?:я\s+)?(?:имел(?:а)?\s+в\s+виду|"
+    r"говорю|спрашиваю)\s+(?:про|о|об)\s+\S.+$|"
+    r"^(?:(?:нет[,.]?\s+)(?:я\s+)?|я\s+)(?:про|о|об)\s+\S.+$|"
+    r"^не\s+\S.+?[,—–-]+\s*а\s+\S.+$",
+    re.IGNORECASE,
+)
+_AFFIRMATIVE_FOLLOWUP = re.compile(
+    r"^(?:да|давай(?:те)?|хорошо|ок(?:ей)?|продолжай(?:те)?|"
+    r"да[, ]+продолжай(?:те)?|да[, ]+давай(?:те)?)[?!.]*$",
+    re.IGNORECASE,
+)
+_NEGATIVE_ANSWER_FEEDBACK = re.compile(
+    r"^(?:нет[,.]?\s+)?(?:это\s+)?(?:"
+    r"не\s+то|неверно|неправильно|ответ\s+не\s+по\s+теме|"
+    r"ты\s+(?:меня\s+)?не\s+понял(?:а)?|вы\s+(?:меня\s+)?не\s+поняли|"
+    r"я\s+спрашивал(?:а)?\s+не\s+об\s+этом)"
+    r"[?!.]*$",
+    re.IGNORECASE,
+)
+_NUMBERED_ITEM_FOLLOWUP = re.compile(
+    r"^(?:(?:а\s+)?(?:что\s+)?(?:про|о)\s+)?(?:"
+    r"перв(?:ый|ом)|втор(?:ой|ом)|трет(?:ий|ьем)|четверт(?:ый|ом)|"
+    r"пят(?:ый|ом)|последн(?:ий|ем))\s+(?:пункт|вариант|элемент)?"
+    r"[?!.]*$|^(?:расскажи(?:те)?|подробнее)\s+(?:про|о)\s+"
+    r"(?:перв(?:ый|ом)|втор(?:ой|ом)|трет(?:ий|ьем)|четверт(?:ый|ом)|"
+    r"пят(?:ый|ом)|последн(?:ий|ем))\s+(?:пункт|вариант|элемент)[?!.]*$",
+    re.IGNORECASE,
+)
+_COMPARISON_FOLLOWUP = re.compile(
+    r"^(?:а\s+)?(?:(?:в\s+чем|в\s+чём)\s+разниц(?:а|ы)|"
+    r"чем\s+(?:они\s+)?отличаются)[?!.]*$",
+    re.IGNORECASE,
+)
+_CONDITIONAL_FOLLOWUP = re.compile(
+    r"^(?:а\s+)?(?:если|в\s+случае|при\s+условии)\b.+$",
+    re.IGNORECASE,
+)
+
+
+def is_answer_rewrite_request(question: str) -> bool:
+    """Whether the whole turn only asks to reshape the previous answer."""
+    text = " ".join(str(question or "").strip().split())
+    return bool(text and _ANSWER_REWRITE_REQUEST.fullmatch(text))
+
+
+def _is_dialogue_control_followup(question: str) -> bool:
+    """Whether a turn needs a preceding offer, question, or answer."""
+    text = " ".join(str(question or "").strip().split())
+    return bool(
+        text
+        and (
+            _ANSWER_REWRITE_REQUEST.fullmatch(text)
+            or _DIALOGUE_SELECTION.fullmatch(text)
+            or _VERIFICATION_FOLLOWUP.fullmatch(text)
+            or _TOPIC_CORRECTION_FOLLOWUP.fullmatch(text)
+            or _AFFIRMATIVE_FOLLOWUP.fullmatch(text)
+            or _NEGATIVE_ANSWER_FEEDBACK.fullmatch(text)
+            or _NUMBERED_ITEM_FOLLOWUP.fullmatch(text)
+            or _COMPARISON_FOLLOWUP.fullmatch(text)
+            or (
+                _CONDITIONAL_FOLLOWUP.fullmatch(text)
+                and not _has_explicit_target(text)
+            )
+        )
+    )
 
 # Short procedural questions often omit the object without using a pronoun:
 # «какую конфигурацию нужно заполнить?», «какие параметры обязательны?».  They
@@ -892,6 +1101,19 @@ def _needs_history_resolution(question: str) -> bool:
     if not text:
         return False
     if _EXPANSION_FOLLOWUP.fullmatch(text):
+        return True
+    if (
+        _DIALOGUE_SELECTION.fullmatch(text)
+        or _VERIFICATION_FOLLOWUP.fullmatch(text)
+        or _TOPIC_CORRECTION_FOLLOWUP.fullmatch(text)
+        or _AFFIRMATIVE_FOLLOWUP.fullmatch(text)
+        or _NUMBERED_ITEM_FOLLOWUP.fullmatch(text)
+        or _COMPARISON_FOLLOWUP.fullmatch(text)
+        or (
+            _CONDITIONAL_FOLLOWUP.fullmatch(text)
+            and not _has_explicit_target(text)
+        )
+    ):
         return True
     # «что известно про кластер и его настройку» is self-contained: «его»
     # points to the noun in the SAME sentence, not to dialogue history.
@@ -985,6 +1207,8 @@ def _parse_shape(value: Any) -> str:
 def _clearly_unresolved_first_turn(question: str) -> bool:
     """Narrow first-turn cases that cannot be answered without a subject."""
     text = " ".join(str(question or "").strip().split())
+    if _is_dialogue_control_followup(text):
+        return True
     if requests_example(text) and not example_subject_terms(text):
         return True
     return bool(
@@ -1427,8 +1651,39 @@ async def condense_with_report(
     question — the verdicts look identical from the outside.
     """
     started = time.perf_counter()
+    if is_conversational_turn(question):
+        return Condensed(
+            "smalltalk",
+            question,
+            corpus_scope.DEFAULT_SCOPE,
+            DEFAULT_SHAPE,
+        ), _outcome(
+            "skipped", {}, started, detail="детерминированная диалоговая реплика"
+        )
     history = _history_turns(messages, question)
     answering_clarification = _answers_context_clarification(history)
+    if is_answer_rewrite_request(question) and any(
+        turn.get("role") == "assistant" for turn in history
+    ):
+        return Condensed(
+            "clarify",
+            question,
+            corpus_scope.DEFAULT_SCOPE,
+            DEFAULT_SHAPE,
+        ), _outcome(
+            "skipped", {}, started, detail="детерминированная просьба изменить форму ответа"
+        )
+    if _NEGATIVE_ANSWER_FEEDBACK.fullmatch(
+        " ".join(str(question or "").strip().split())
+    ) and any(turn.get("role") == "assistant" for turn in history):
+        return Condensed(
+            "clarify",
+            question,
+            corpus_scope.DEFAULT_SCOPE,
+            DEFAULT_SHAPE,
+        ), _outcome(
+            "skipped", {}, started, detail="детерминированная оценка прошлого ответа"
+        )
     if not bool(rcfg.get("condense_enabled", True)):
         return _fallback(
             question,

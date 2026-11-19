@@ -393,6 +393,137 @@ def test_condense_receives_persisted_active_topic(monkeypatch):
     assert "Активная тема этого чата: Мониторинг моделей" in calls[0]
 
 
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Объясни проще",
+        "Скажи короче, пожалуйста",
+        "Переформулируй",
+        "Повтори",
+        "Сделай это по шагам",
+        "Оформи в виде таблицы",
+    ],
+)
+def test_answer_rewrite_requests_skip_retrieval_and_condense(monkeypatch, question):
+    calls = _install_complete_json(
+        monkeypatch, lambda prompt: pytest.fail("модель не должна вызываться")
+    )
+    history = [
+        {"role": "user", "content": "Что такое АРМ DS?"},
+        {"role": "assistant", "content": "АРМ DS — инструмент из базы знаний."},
+    ]
+
+    result = asyncio.run(
+        rag_pipeline.condense_with_report(question, history, {}, {})
+    )
+
+    condensed, report = result
+    assert condensed.intent == "clarify"
+    assert condensed.question == question
+    assert report["status"] == "skipped"
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("question", "standalone"),
+    [
+        ("Общее описание", "Дай общее описание АРМ DS"),
+        ("Давай инструкцию", "Дай инструкцию по работе с АРМ DS"),
+        ("Первый вариант", "Дай общее описание АРМ DS"),
+        ("Это точно?", "Что такое АРМ DS?"),
+        ("Проверь ещё раз", "Что такое АРМ DS?"),
+        ("Да, продолжай", "Расскажи подробнее про АРМ DS"),
+        ("Нет, я про YAFCA", "Что такое YAFCA?"),
+        ("Не Fincert, а YAFCA", "Что такое YAFCA?"),
+    ],
+)
+def test_dialogue_control_turns_may_restore_a_complete_question(
+    monkeypatch, question, standalone
+):
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {
+            "intent": "kb_question",
+            "standalone_question": standalone,
+            "uses_history": True,
+            "context_subject": "YAFCA" if "YAFCA" in standalone else "АРМ DS",
+        },
+    )
+    history = [
+        {"role": "user", "content": "Что такое АРМ DS?"},
+        {
+            "role": "assistant",
+            "content": "Могу дать общее описание или инструкцию.",
+        },
+    ]
+
+    result = asyncio.run(rag_pipeline.condense(question, history, {}, {}))
+
+    assert result.intent == "kb_question"
+    assert result.question == standalone
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Объясни проще принцип работы Fincert",
+        "Проверь ещё раз документацию по YAFCA",
+        "Мне нужен доступ к Bitbucket Fincert",
+        "Да, расскажи про Fincert",
+    ],
+)
+def test_self_contained_questions_are_not_dialogue_control_followups(question):
+    assert rag_pipeline.needs_history_resolution(question) is False
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Объясни проще",
+        "Общее описание",
+        "Это точно?",
+        "Да, продолжай",
+        "Это не то",
+        "Нет, я про YAFCA",
+    ],
+)
+def test_dialogue_control_without_history_asks_for_context(question):
+    result = asyncio.run(rag_pipeline.condense(question, None, {}, {}))
+
+    assert result.intent == rag_pipeline.CONTEXT_CLARIFICATION_INTENT
+    assert result.question == rag_pipeline.CONTEXT_CLARIFICATION_ANSWER
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Это не то",
+        "Неверно",
+        "Ответ не по теме",
+        "Ты меня не понял",
+        "Я спрашивала не об этом",
+    ],
+)
+def test_negative_answer_feedback_asks_for_correction_without_search(
+    monkeypatch, question
+):
+    calls = _install_complete_json(
+        monkeypatch, lambda prompt: pytest.fail("модель condense не должна вызываться")
+    )
+    history = [
+        {"role": "user", "content": "Что такое АРМ DS?"},
+        {"role": "assistant", "content": "Ответ про АРМ DS."},
+    ]
+
+    condensed, report = asyncio.run(
+        rag_pipeline.condense_with_report(question, history, {}, {})
+    )
+
+    assert condensed.intent == "clarify"
+    assert report["status"] == "skipped"
+    assert calls == []
+
+
 def test_condense_resolves_example_followup_without_a_pronoun(monkeypatch):
     _install_complete_json(
         monkeypatch,
@@ -677,14 +808,14 @@ def test_condense_call_failure_asks_to_clarify(monkeypatch, caplog):
     assert caplog.records
 
 
-def test_condense_disabled_by_flag(monkeypatch):
+def test_deterministic_smalltalk_works_when_model_condense_is_disabled(monkeypatch):
     calls = _install_complete_json(monkeypatch, lambda p: {"intent": "smalltalk"})
 
     intent, question = _condense(
         rag_pipeline.condense("спасибо", _history(), {"condense_enabled": False}, {})
     )
 
-    assert (intent, question) == ("kb_question", "спасибо")
+    assert (intent, question) == ("smalltalk", "спасибо")
     assert calls == []
 
 
@@ -1347,10 +1478,29 @@ def test_ambiguous_inference_on_first_turn_asks_for_the_tool(monkeypatch):
         "Это всё?",
         "Есть ещё документы?",
         "Какие ещё детали есть?",
+        "А дальше?",
+        "Что потом?",
+        "Следующий шаг",
+        "А если нет доступа?",
+        "Расскажи про второй пункт",
+        "В чём разница?",
+        "Чем они отличаются?",
     ],
 )
 def test_expansion_followups_require_history_resolution(question):
     assert rag_pipeline.needs_history_resolution(question) is True
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "А если Fincert недоступен?",
+        "В чём разница между Fincert и YAFCA?",
+        "Расскажи про второй модуль Fincert",
+    ],
+)
+def test_self_contained_conditions_and_comparisons_do_not_borrow_old_topic(question):
+    assert rag_pipeline.needs_history_resolution(question) is False
 
 
 @pytest.mark.parametrize(
@@ -1477,12 +1627,110 @@ def test_smalltalk_skips_retrieval_but_keeps_a_system_turn(monkeypatch):
     assert seen == [], "поиск не должен вызываться"
 
 
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Привет, нужна помощь",
+        "Здравствуйте! Можете помочь?",
+        "Мне нужна помощь",
+        "Помоги, пожалуйста",
+        "Привет, как дела?",
+    ],
+)
+def test_first_turn_general_help_is_conversational_without_retrieval(
+    monkeypatch, question
+):
+    seen = _install_retrieval(monkeypatch, [_frag(1)])
+
+    async def must_not_call_model(*args, **kwargs):
+        raise AssertionError("condense model must not be called")
+
+    monkeypatch.setattr(
+        rag_pipeline.llm, "complete_json", must_not_call_model, raising=False
+    )
+
+    ctx = _build(question)
+
+    assert ctx.intent == "smalltalk"
+    assert ctx.system_message["content"] == rag.NO_RAG_SYSTEM_PROMPT
+    assert ctx.user_message is None
+    assert ctx.answer_override is None
+    assert seen == []
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Привет, помоги настроить Fincert",
+        "Нужна помощь с Мониторингом моделей",
+        "Можешь помочь получить доступ к Bitbucket Fincert?",
+        "Помоги выбрать холодильник",
+    ],
+)
+def test_greeting_or_help_with_a_subject_is_not_generic_smalltalk(question):
+    assert rag_pipeline.is_conversational_turn(question) is False
+
+
+@pytest.mark.parametrize(
+    "question, expected",
+    [
+        ("Хочу поговорить про арм дс", "АРМ DS"),
+        ("Давайте обсудим Fincert Enricher", "Fincert Enricher"),
+        ("Давайте поговорим про Fincert Enricher", "Fincert Enricher"),
+        ("Мне интересно узнать про Мониторинг моделей", "Мониторинг моделей"),
+        ("Нужна помощь с автоматическим дообучением", "автоматическим дообучением"),
+        ("Хочу разобраться в Data Lineage", "Data Lineage"),
+        ("Давайте начнём с темы YAFCA", "YAFCA"),
+        ("Перейдём к Feature Store", "Feature Store"),
+        ("Давайте про Алертинг", "Алертинг"),
+    ],
+)
+def test_topic_opening_extracts_one_dialogue_subject(question, expected):
+    assert rag_pipeline.topic_opening_subject(question) == expected
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Расскажи про Fincert",
+        "Что такое АРМ ДС?",
+        "Хочу поговорить про то, как настроить Fincert",
+        "Нужна помощь: как получить доступ к Bitbucket Fincert?",
+        "Помоги выбрать холодильник",
+    ],
+)
+def test_concrete_questions_are_not_reduced_to_topic_openings(question):
+    assert rag_pipeline.topic_opening_subject(question) is None
+
+
+def test_topic_opening_is_validated_by_retrieval_then_asks_what_to_explain(
+    monkeypatch,
+):
+    hit = _frag(1, text="АРМ DS — раздел базы знаний с инструкциями.")
+    hit.update(path="АРМ DS/Обзор.md", title="АРМ DS")
+    seen = _install_retrieval(monkeypatch, [hit])
+    _install_complete_json(
+        monkeypatch, lambda prompt: {"grades": [{"id": 1, "score": 5}]}
+    )
+
+    ctx = _build("Хочу поговорить про арм дс")
+
+    assert ctx.intent == rag_pipeline.TOPIC_OPENING_INTENT
+    assert ctx.standalone_question == "АРМ DS"
+    assert ctx.context_subject == "АРМ DS"
+    assert ctx.sources == []
+    assert "Давайте поговорим про «АРМ DS»" in ctx.answer_override
+    assert "Что именно вас интересует?" in ctx.answer_override
+    assert seen[0][0] == "АРМ DS"
+
+
 def test_no_rag_system_prompt_forbids_answering_from_memory():
     """Текст промпта — константа рядом с остальными, с нужными запретами."""
     prompt = rag.NO_RAG_SYSTEM_PROMPT
     assert "истории диалога" in prompt
     assert "собственных знаний" in prompt
     assert "поиск по базе" in prompt
+    assert "Не отвечай фразой о том, что информация не найдена" in prompt
     # Это не RAG-промпт: блока «Источники» в этой ветке нет.
     assert "Источники" not in prompt
     assert prompt != rag.SYSTEM_PROMPT
