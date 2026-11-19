@@ -1575,6 +1575,95 @@ def test_first_turn_description_uses_the_objects_page_not_parent_catalogue(
     assert "список ссылок" in calls[0]
 
 
+def test_definition_refuses_a_bare_term_mention_with_friendly_kb_wording(
+    monkeypatch,
+):
+    mention = _frag(
+        1,
+        text=(
+            "При обработке заявки используется матчинг. После этого запускается "
+            "следующий этап процесса."
+        ),
+    )
+    mention.update(path="Процессы/Обработка заявки.md", title="Обработка заявки")
+    _install_retrieval(monkeypatch, [mention])
+    calls = _install_complete_json(
+        monkeypatch, lambda prompt: {"grades": [{"id": 1, "score": 3}]}
+    )
+
+    ctx = _build("Что такое матчинг?")
+
+    assert ctx.sources == []
+    assert ctx.answer_override is not None
+    assert "в базе знаний не нашлось описания «матчинг»" in ctx.answer_override
+    assert "одного упоминания недостаточно" in ctx.answer_override
+    assert "представленном фрагменте" not in ctx.answer_override
+    assert "Простое употребление слова X" in calls[0]
+
+
+def test_definition_accepts_documented_workflow_without_literal_is_a_phrase(
+    monkeypatch,
+):
+    description = _frag(
+        1,
+        text=(
+            "Матчинг сопоставляет входящие записи с профилями клиентов по "
+            "набору настроенных правил и передаёт найденные соответствия дальше."
+        ),
+    )
+    description.update(path="Инструменты/Матчинг.md", title="Матчинг")
+    _install_retrieval(monkeypatch, [description])
+    _install_complete_json(
+        monkeypatch, lambda prompt: {"grades": [{"id": 1, "score": 4}]}
+    )
+
+    ctx = _build("Что такое матчинг?")
+
+    assert ctx.answer_override is None
+    assert [source["path"] for source in ctx.sources] == [description["path"]]
+
+
+def test_undefined_parent_is_presented_as_a_section_not_a_kb_product(monkeypatch):
+    mention = _frag(1, text="Раздел Fincert содержит несколько ссылок.")
+    mention.update(path="Продукты/Fincert.md", title="Fincert")
+    _install_retrieval(monkeypatch, [mention])
+    _install_complete_json(
+        monkeypatch, lambda prompt: {"grades": [{"id": 1, "score": 2}]}
+    )
+
+    async def inventory(subject, cv=None, *, limit=20):
+        assert subject == "Fincert"
+        return rag.corpus_tree.SectionInventory(
+            name="Fincert",
+            items=(
+                "Fincert Enricher",
+                "Сервис ответов на запросы",
+                "Сервис получения ФИДов",
+            ),
+            total_items=3,
+        )
+
+    monkeypatch.setattr(rag.corpus_tree, "section_inventory", inventory)
+
+    ctx = _build("Что такое Fincert?")
+
+    answer = ctx.answer_override or ""
+    assert answer.startswith(
+        "В базе знаний есть раздел «Fincert», но общего описания «Fincert»"
+    )
+    assert "- Fincert Enricher" in answer
+    assert "- Сервис ответов на запросы" in answer
+    assert "- Сервис получения ФИДов" in answer
+    assert "Fincert — продукт в базе знаний" not in answer
+    assert ctx.sources == []
+
+
+def test_prompts_do_not_infer_entity_type_from_knowledge_base_location():
+    for prompt in (rag.SYSTEM_PROMPT, rag.GROUNDING_GUARD):
+        assert "продукт" in prompt and "базе знаний" in prompt
+        assert "не доказывает тип сущности" in prompt or "не определяет их тип" in prompt
+
+
 def test_availability_features_are_not_presented_as_sla(monkeypatch):
     hit = _frag(
         1,

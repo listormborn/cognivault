@@ -62,6 +62,10 @@ SYSTEM_PROMPT = """Ты — ассистент по базе знаний. От�
   процесса или инструмента — я выполню поиск ещё раз». После этого остановись.
   Это ответ целиком, а не вступление: если дальше ты всё же что-то перечисляешь,
   значит ответ у тебя есть и начинать с отказа нельзя.
+- Если вопрос просит объяснить термин или объект, а источники только упоминают
+  его без определения, назначения, возможностей, задач или процесса работы,
+  мягко скажи, что в базе знаний не нашлось его описания. Не говори
+  «в представленном фрагменте», «в контексте» или «в предоставленных данных».
 - В источниках встречаются markdown-таблицы: внимательно сопоставляй значения ячеек
   с заголовками их столбцов и строк.
 - Отвечай на русском языке, кратко и по делу.
@@ -74,6 +78,10 @@ SYSTEM_PROMPT = """Ты — ассистент по базе знаний. От�
   По таким фактам можно кратко суммировать, что объект делает, даже если в тексте
   нет шаблонной фразы «X — это». Но одного названия страницы, пункта оглавления,
   списка ссылок, дочерних API или описания соседнего сервиса недостаточно.
+- Не называй сущность «продуктом в базе знаний» или «инструментом в базе знаний»:
+  база знаний описывает сущности, но не определяет их тип самим фактом наличия
+  страницы. Называй её продуктом, сервисом или инструментом только если это явно
+  следует из текста источника. Наличие одноимённой папки подтверждает лишь раздел.
 
 Полнота перечислений:
 - Если спрашивают «какие», «все», «перечисли» — выпиши ВСЕ подходящие элементы из
@@ -158,6 +166,12 @@ GROUNDING_GUARD = """Обязательные правила достоверн�
   документированным возможностям, задачам и процессу работы САМОГО объекта.
   Можно кратко суммировать эти факты, но нельзя делать вывод только из названия
   страницы, оглавления, списка ссылок, дочерних API или соседних сервисов.
+- Если источники только упоминают термин или объект, но не объясняют его,
+  сообщи, что в базе знаний не нашлось описания. Не заменяй «базу знаний» словами
+  «представленный фрагмент», «контекст» или «предоставленные данные».
+- Не говори «X — продукт в базе знаний» или «X — инструмент в базе знаний».
+  Расположение страницы в разделе не доказывает тип сущности. Если известно
+  только наличие раздела, называй его разделом и перечисляй его состав отдельно.
 - Если не запрошены подробности или полный перечень, дай краткое достаточное
   резюме и не пересказывай подряд все найденные фрагменты.
 - Каждый шаг последовательности пиши с новой строки и нумеруй как 1., 2., 3.
@@ -330,19 +344,42 @@ _NO_ANSWER = (
     "указать название продукта, процесса или инструмента — я выполню поиск ещё раз."
 )
 
-_NO_TOOL_DESCRIPTION = (
-    "В базе знаний не найдено описание указанного инструмента или продукта. "
-    "Я не буду определять его по названию или подменять сведениями о похожих "
-    "продуктах."
-)
-
-
-def _no_answer_for(question: str) -> str:
-    return (
-        _NO_TOOL_DESCRIPTION
-        if rag_pipeline.requests_tool_description(question)
-        else _NO_ANSWER
+def _section_inventory_answer(
+    inventory: corpus_tree.SectionInventory,
+) -> str:
+    lines = [
+        f"В базе знаний есть раздел «{inventory.name}», но общего описания "
+        f"«{inventory.name}» в документах не нашлось.",
+        "Внутри раздела есть страницы о следующих продуктах, сервисах и материалах:",
+        *(f"- {item}" for item in inventory.items),
+    ]
+    hidden = inventory.total_items - len(inventory.items)
+    if hidden > 0:
+        lines.append(f"- Ещё {hidden} элементов")
+    lines.append(
+        "Могу отдельно найти описание или инструкцию по любому из этих пунктов."
     )
+    return "\n".join(lines)
+
+
+async def _no_answer_for(
+    question: str,
+    cv: dict[str, Any] | None = None,
+) -> str:
+    subject = rag_pipeline.description_subject(question)
+    if rag_pipeline.requests_tool_description(question):
+        if subject:
+            inventory = await corpus_tree.section_inventory(subject, cv)
+            if inventory:
+                return _section_inventory_answer(inventory)
+        named = f" «{subject}»" if subject else " этого термина или объекта"
+        return (
+            f"К сожалению, в базе знаний не нашлось описания{named}. "
+            "В документах может встречаться это название, но одного упоминания "
+            "недостаточно, чтобы надёжно объяснить его значение. Если уточните "
+            "продукт или процесс, в котором оно используется, я попробую поискать точнее."
+        )
+    return _NO_ANSWER
 
 
 def _topic_opening_answer(subject: str) -> str:
@@ -1216,6 +1253,7 @@ async def _build_auto(
     answer_query = rq
     if raw_example_request and not rag_pipeline.requests_example(rq):
         answer_query = f"{rq}\nТребование исходного вопроса: {query}"
+    definition_request = rag_pipeline.requests_tool_description(answer_query)
 
     if example_request and not rag_pipeline.example_subject_terms(rq):
         return RagContext(
@@ -1321,7 +1359,7 @@ async def _build_auto(
             answer_override=(
                 _NO_EXACT_EXAMPLE
                 if exact_example
-                else _no_answer_for(answer_query)
+                else await _no_answer_for(answer_query, cv)
             ),
             intent=intent,
             standalone_question=rq,
@@ -1358,7 +1396,7 @@ async def _build_auto(
                 answer_override=(
                     _NO_EXACT_EXAMPLE
                     if exact_example
-                    else _no_answer_for(answer_query)
+                    else await _no_answer_for(answer_query, cv)
                 ),
                 scope=scope,
                 hidden_calls=hidden,
@@ -1404,8 +1442,14 @@ async def _build_auto(
         else None
     )
 
+    strict_definition = definition_request and any(
+        grade is not None for grade in grade_list
+    )
     fragments, refused = rag_pipeline.select(
-        fragments, grade_list, rcfg, strict=exact_example
+        fragments,
+        grade_list,
+        rcfg,
+        strict=exact_example or strict_definition,
     )
     if refused:
         return RagContext(
@@ -1417,7 +1461,7 @@ async def _build_auto(
             answer_override=(
                 _NO_EXACT_EXAMPLE
                 if exact_example
-                else _no_answer_for(answer_query)
+                else await _no_answer_for(answer_query, cv)
             ),
             scope=scope,
             hidden_calls=hidden,
@@ -1442,7 +1486,7 @@ async def _build_auto(
                 answer_override=(
                     _NO_EXACT_EXAMPLE
                     if exact_example
-                    else _no_answer_for(answer_query)
+                    else await _no_answer_for(answer_query, cv)
                 ),
                 scope=scope,
                 hidden_calls=hidden,

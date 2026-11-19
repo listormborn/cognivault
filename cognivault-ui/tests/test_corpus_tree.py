@@ -155,6 +155,32 @@ def test_tree_survives_garbage_in_the_catalogue():
     assert prefix == f"{_ROOT}/Продукты"
 
 
+def test_find_section_returns_only_real_immediate_children():
+    docs = [
+        _doc("Продукты.md", _EMPTY),
+        _doc("Продукты/Fincert.md", _EMPTY),
+        _doc("Продукты/Fincert/Fincert Enricher.md"),
+        _doc("Продукты/Fincert/Сервис получения ФИДов.md"),
+        _doc("Продукты/Fincert/Fincert Enricher/Конфигурация.md"),
+        _doc("Продукты/YAFCA.md"),
+    ]
+
+    inventory = corpus_tree.find_section(_payload(docs), "fincert")
+
+    assert inventory == corpus_tree.SectionInventory(
+        name="Fincert",
+        items=("Fincert Enricher", "Сервис получения ФИДов"),
+        total_items=2,
+    )
+
+
+def test_find_section_does_not_use_substring_or_leaf_without_children():
+    payload = _payload()
+
+    assert corpus_tree.find_section(payload, "Fin") is None
+    assert corpus_tree.find_section(payload, "Сервис получения ФИДов") is None
+
+
 # --------------------------------------------------------------------------- #
 # Пометки: что скрывают заголовки
 # --------------------------------------------------------------------------- #

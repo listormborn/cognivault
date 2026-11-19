@@ -193,6 +193,15 @@ class _Node:
         )
 
 
+@dataclass(frozen=True)
+class SectionInventory:
+    """A real catalogue section and the immediate entries inside it."""
+
+    name: str
+    items: tuple[str, ...]
+    total_items: int
+
+
 def _segments(path: str) -> list[str]:
     """Path → node names: separators normalised, extension dropped from the leaf."""
     parts = [s for s in path.replace("\\", "/").strip().split("/") if s and s != "."]
@@ -558,6 +567,64 @@ def top_level_titles(
     ]
 
 
+def _section_key(value: Any) -> str:
+    """Conservative identity key for an explicit section name."""
+    return " ".join(
+        re.findall(r"[a-zа-яё0-9]+", str(value or "").casefold(), re.IGNORECASE)
+    )
+
+
+def find_section(
+    data: dict[str, Any] | None,
+    subject: str,
+    *,
+    limit: int = 20,
+) -> SectionInventory | None:
+    """Find an exact catalogue section and list its immediate children.
+
+    This is structural evidence only. It can establish that a section exists
+    and which pages sit directly inside it, never what the section *means*.
+    Exact identity matching is deliberate: a substring match for a generic
+    term such as «Связи» would recreate the same false-positive problem as RAG.
+    """
+    if limit <= 0:
+        return None
+    prepared = _prepare(data)
+    if prepared is None:
+        return None
+    wanted = _section_key(subject)
+    if not wanted:
+        return None
+
+    matches: list[_Node] = []
+
+    def visit(node: _Node) -> None:
+        if _section_key(node.name) == wanted and node.children:
+            matches.append(node)
+        for child in node.children:
+            visit(child)
+
+    for root in prepared[0]:
+        visit(root)
+    if not matches:
+        return None
+
+    # Prefer the richest exact section if the same page name exists in several
+    # branches. We do not merge branches: that would mix unrelated products.
+    node = max(matches, key=lambda item: (item.subtree_documents, len(item.children)))
+    names = sorted(
+        {child.name for child in node.children if child.name.strip()},
+        key=str.casefold,
+    )
+    if not names:
+        return None
+    return SectionInventory(
+        name=node.name,
+        items=tuple(names[:limit]),
+        total_items=len(names),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Entry points
 # --------------------------------------------------------------------------- #
@@ -602,4 +669,21 @@ async def overview_block(cv: dict[str, Any] | None = None) -> str | None:
         return render_overview(data)
     except Exception:  # noqa: BLE001 — pure code, but the turn is worth more
         log.exception("не удалось отрисовать дерево разделов")
+        return None
+
+
+async def section_inventory(
+    subject: str,
+    cv: dict[str, Any] | None = None,
+    *,
+    limit: int = 20,
+) -> SectionInventory | None:
+    """Cached structural fallback for an undefined but existing section."""
+    data = await catalog.payload(cv)
+    if data is None:
+        return None
+    try:
+        return find_section(data, subject, limit=limit)
+    except Exception:  # noqa: BLE001 — a chat refusal must remain available
+        log.exception("не удалось найти раздел %r в каталоге", subject)
         return None

@@ -590,8 +590,9 @@ def test_missing_tool_description_has_explicit_non_inventing_answer(monkeypatch)
     _install_retrieval(monkeypatch, [])
     ctx = _build("Что такое UnknownTool?", [])
 
-    assert ctx.answer_override == rag._NO_TOOL_DESCRIPTION
-    assert "не найдено описание" in ctx.answer_override
+    assert ctx.answer_override is not None
+    assert "в базе знаний не нашлось описания «UnknownTool»" in ctx.answer_override
+    assert "одного упоминания недостаточно" in ctx.answer_override
 
 
 def test_prompt_requires_concise_summary_and_stable_numbering():
