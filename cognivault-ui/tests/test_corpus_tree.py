@@ -870,7 +870,17 @@ def test_topic_qualified_questions_stay_in_retrieval():
 
 
 def test_the_tree_contains_what_those_three_questions_ask_for(monkeypatch):
-    _install(monkeypatch, [_hit(f"{_ROOT}/Продукты/Fincert.md", 1)])
+    _install(
+        monkeypatch,
+        [
+            _hit(
+                f"{_ROOT}/Продукты/Описание витрин/ClickHouse/"
+                "АРМ Оператора/Данные по резолюциям "
+                "(afpc_inc_distr.resolutions_safp).md",
+                1,
+            )
+        ],
+    )
     content = _build("Какие витрины ClickHouse описаны в базе?", True).user_message[
         "content"
     ]
@@ -970,6 +980,9 @@ def test_tree_displaces_nothing_on_the_control_group(monkeypatch):
         off = _build(row["question"], False)
         on = _build(row["question"], True)
 
+        if off.user_message is None or on.user_message is None:
+            failures.append(f"{row['id']}: настоящий источник отфильтрован")
+            continue
         content_on = on.user_message["content"]
         content_off = off.user_message["content"]
         tail_on = content_on[content_on.index("Источники:") :]

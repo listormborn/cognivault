@@ -139,7 +139,8 @@ _KB_ACTION_REQUEST = re.compile(
     r"создай(?:те)?|создать|добавь(?:те)?|добавить|удали(?:те)?|удалить|"
     r"загрузи(?:те)?|загрузить|выгрузи(?:те)?|выгрузить|"
     r"синхронизируй(?:те)?|синхронизировать|"
-    r"переиндексируй(?:те)?|переиндексировать|обнови(?:те)?|обновить|"
+    r"переиндексируй(?:те)?|переиндексировать|"
+    r"проиндексируй(?:те)?|проиндексировать|обнови(?:те)?|обновить|"
     r"разверни(?:те)?|развернуть|задеплой(?:те)?|задеплоить|"
     r"выдай(?:те)?|выдать|открой(?:те)?|открыть|закрой(?:те)?|закрыть|"
     r"включи(?:те)?|включить|выключи(?:те)?|выключить|"
@@ -158,7 +159,8 @@ _ACTION_DELEGATION = re.compile(
     r"запусти(?:те)?|запустить|настрой(?:те)?|настроить|"
     r"поставь(?:те)?|поставить|подключи(?:те)?|подключить|"
     r"синхронизируй(?:те)?|синхронизировать|"
-    r"переиндексируй(?:те)?|переиндексировать)\s+(?:это\s+)?"
+    r"переиндексируй(?:те)?|переиндексировать|"
+    r"проиндексируй(?:те)?|проиндексировать)\s+(?:это\s+)?"
     r"(?:(?:сам(?:а|и)?|за\s+меня|вместо\s+меня))"
     r"[?!.]*$|^(?:(?:а|тогда)\s+)?(?:сделай(?:те)?|выполни(?:те)?)\s+это[?!.]*$",
     re.IGNORECASE,
@@ -178,6 +180,7 @@ _ACTION_INFINITIVES = {
     "выгрузи": "выгрузить",
     "синхронизируй": "синхронизировать",
     "переиндексируй": "переиндексировать",
+    "проиндексируй": "проиндексировать",
     "обнови": "обновить",
     "разверни": "развернуть",
     "задеплой": "задеплоить",
@@ -218,13 +221,13 @@ def requests_action_delegation(question: str) -> bool:
 _EXPLICIT_DELEGATED_OPERATION = re.compile(
     r"\b(?:запусти|запустить|настрой|настроить|поставь|поставить|"
     r"подключи|подключить|синхронизируй|синхронизировать|"
-    r"переиндексируй|переиндексировать)\b",
+    r"переиндексируй|переиндексировать|проиндексируй|проиндексировать)\b",
     re.IGNORECASE,
 )
 _HOW_TO_OPERATION = re.compile(
     r"\bкак\s+(?:поставить|запустить|перезапустить|остановить|настроить|"
     r"подключить|создать|добавить|удалить|загрузить|выгрузить|"
-    r"синхронизировать|переиндексировать|обновить|развернуть|"
+    r"синхронизировать|переиндексировать|проиндексировать|обновить|развернуть|"
     r"задеплоить|выдать|открыть|закрыть|включить|выключить|"
     r"изменить|заполнить|зарегистрировать)\b",
     re.IGNORECASE,
@@ -1610,6 +1613,13 @@ _TECHNICAL_NAME_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
         re.compile(r"(?<![\w])арм[\s-]+(?:ди[\s-]*эс|дс)(?![\w])", re.IGNORECASE),
         "АРМ DS",
     ),
+    (
+        re.compile(
+            r"(?<![\w])(?:когни[\s-]*)?во(?:л|ль)т(?:а|е|ом|у)?(?![\w])",
+            re.IGNORECASE,
+        ),
+        "CogniVault",
+    ),
     (re.compile(r"(?<![\w])гига[\s-]?чат(?![\w])", re.IGNORECASE), "GigaChat"),
     (re.compile(r"(?<![\w])клик[\s-]?хаус(?![\w])", re.IGNORECASE), "ClickHouse"),
     (re.compile(r"(?<![\w])постгрес(?:а|е|ом|у)?(?![\w])", re.IGNORECASE), "PostgreSQL"),
@@ -1663,6 +1673,115 @@ def transliterated_technical_subject(value: Any) -> str | None:
         ) and not any(canonical.casefold() in name.casefold() for name in names):
             names.append(canonical)
     return names[0] if len(names) == 1 else None
+
+
+def explicit_technical_subject(value: Any) -> str | None:
+    """Return one known technical product explicitly named in either script.
+
+    ``transliterated_technical_subject`` deliberately used to require a Russian
+    alias replacement. That left the already-canonical spelling ``Fincert``
+    unscoped on a first turn, where condense is skipped; a generic feature word
+    such as «мониторинг» could then retrieve ARM DS pages. Here canonical names
+    and aliases are treated identically, while two named products still mean a
+    comparison/ambiguous multi-product question and return no single boundary.
+    """
+    normalized, names = _replace_technical_names(value)
+    for canonical in _CANONICAL_TECHNICAL_NAMES:
+        if not re.search(
+            rf"(?<![\w]){re.escape(canonical)}(?![\w])",
+            normalized,
+            re.IGNORECASE,
+        ):
+            continue
+        # A specific compound already covers its parent (Fincert Enricher must
+        # not also count as a separate mention of Fincert).
+        if any(canonical.casefold() in name.casefold() for name in names):
+            continue
+        names.append(canonical)
+    return names[0] if len(names) == 1 else None
+
+
+def explicit_technical_subjects(value: Any) -> list[str]:
+    """All distinct known products explicitly named in a turn."""
+    normalized, names = _replace_technical_names(value)
+    for canonical in _CANONICAL_TECHNICAL_NAMES:
+        if not re.search(
+            rf"(?<![\w]){re.escape(canonical)}(?![\w])",
+            normalized,
+            re.IGNORECASE,
+        ):
+            continue
+        if any(canonical.casefold() in name.casefold() for name in names):
+            continue
+        names.append(canonical)
+    result: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        key = name.casefold()
+        if key not in seen:
+            seen.add(key)
+            result.append(name)
+    return result
+
+
+_CROSS_PRODUCT_TRANSFER_ACTION = re.compile(
+    r"\b(?:адаптир\w*|передела\w*|перенес\w*|перенос\w*|скопир\w*|"
+    r"подстав\w*|использ\w*|возьм\w*|возьми\w*|сдела\w*[^\n]{0,80}?"
+    r"(?:так(?:ой|ую|ое)\s+же|по\s+аналогии))\b",
+    re.IGNORECASE,
+)
+
+
+def requests_cross_product_transfer(
+    question: str,
+    active_subject: Any = None,
+) -> bool:
+    """Whether a technical artefact is requested to be adapted across products."""
+    text = canonicalize_technical_names(question)
+    if not _CROSS_PRODUCT_TRANSFER_ACTION.search(text):
+        return False
+    subjects = explicit_technical_subjects(text)
+    active = _context_subject(active_subject)
+    if active and not any(
+        context_subjects_overlap(active, subject) for subject in subjects
+    ):
+        subjects.append(active)
+    # The transfer action plus two unrelated named product families is enough;
+    # unlike «сравни», these verbs ask to reuse an artefact, not merely discuss it.
+    families: list[str] = []
+    for subject in subjects:
+        if not any(context_subjects_overlap(subject, item) for item in families):
+            families.append(subject)
+    return len(families) >= 2
+
+
+_FEATURE_EXISTENCE_QUESTION = re.compile(
+    r"\b(?:есть|имеется|доступ\w*|предусмотр\w*|поддержива\w*)\s+ли\b",
+    re.IGNORECASE,
+)
+
+
+def feature_container_subject(value: Any) -> str | None:
+    """One product Y in an explicit «есть/поддерживается ли X в Y?» question."""
+    text = canonicalize_technical_names(value)
+    if not _FEATURE_EXISTENCE_QUESTION.search(text):
+        return None
+    subject = explicit_technical_subject(text)
+    if not subject:
+        return None
+    escaped = re.escape(subject)
+    # The product is either the named container («в Fincert») or the subject of
+    # «поддерживает ли Fincert …». A mere environmental mention in another kind
+    # of question («какие потоки существуют только в BitBucket») is not a hard
+    # source boundary.
+    if re.search(
+        rf"\b(?:в|во|у)\s+{escaped}(?![\w])|"
+        rf"\b(?:поддержива\w*)\s+ли\s+{escaped}(?![\w])",
+        text,
+        re.IGNORECASE,
+    ):
+        return subject
+    return None
 
 
 def _context_subject(value: Any) -> str | None:

@@ -149,8 +149,9 @@ GROUNDING_GUARD = """Обязательные правила достоверн�
   секреты. Можно объяснять только документированный процесс получения доступа,
   но нельзя раскрывать само значение секрета.
 - Если просьба или вопрос не относится к продуктам, процессам, инструментам и
-  документации базы знаний, ответь только: «У меня нет информации для выполнения
-  такой просьбы. Я могу помочь только с вопросами по текущей базе знаний.»
+  документации базы знаний, ответь только: «Этот запрос не относится к темам
+  базы знаний. Я могу помочь с вопросами о продуктах, инструментах и процессах,
+  которые в ней описаны.»
   После этой фразы остановись. Не давай общих советов, не продолжай внешнюю тему
   и не предлагай выбрать, купить, построить, приготовить или подобрать что-либо.
 - Не создавай примеры конфигурации, кода, YAML, JSON, SQL или команд,
@@ -177,6 +178,9 @@ GROUNDING_GUARD = """Обязательные правила достоверн�
 - На вопрос «есть ли X в Y?» сначала прямо ответь, описан ли X для Y в
   источниках. Не сравнивай Y с продуктом из предыдущих сообщений и не объясняй
   различия между ними, если пользователь явно не попросил сравнение.
+- Если вопрос ограничен продуктом Y, не добавляй одноимённые функции, процессы
+  или инструкции из других продуктов. Упоминание «мониторинга» в АРМ DS не
+  отвечает на вопрос о наличии мониторинга в Fincert, и наоборот.
 - Каждый шаг последовательности пиши с новой строки и нумеруй как 1., 2., 3.
   Не объединяй несколько шагов в одной строке и не перезапускай нумерацию.
 - Называй хранилище нейтрально «база знаний». Не говори «ваша база знаний» или
@@ -574,9 +578,17 @@ _NO_EXAMPLE_SUBJECT = (
     "Без этого я не буду искать по всей базе и объединять материалы разных продуктов."
 )
 
+_NO_INVENTED_EXAMPLE = (
+    "Я не буду придумывать пример, которого нет в документации. Назовите "
+    "продукт или инструмент — я проверю, есть ли для него готовый пример в "
+    "базе знаний, и покажу его без изменений."
+)
+
 _NO_CROSS_PRODUCT = (
-    "Уточните, пожалуйста, для какого именно продукта или инструмента нужен ответ. "
-    "Я не буду переносить данные из другого, только похожего продукта."
+    "Я не буду переносить или адаптировать пример, конфигурацию либо параметры "
+    "одного продукта для другого. Могу показать только готовый пример, который "
+    "прямо документирован для нужного продукта; если такого примера нет, я "
+    "сообщу об этом."
 )
 
 # Instruction-only turns have no subject to retrieve. Sending them into search
@@ -588,6 +600,12 @@ _NO_CROSS_PRODUCT = (
 _UNSCOPED_GUESS_REQUEST = re.compile(
     r"^\s*(?:источники\s+не\s+нужны\s*[-—,:;]*\s*)?"
     r"(?:напиши\s+)?(?:наиболее\s+)?вероятн\w*\s+ответ\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+_INVENT_EXAMPLE_REQUEST = re.compile(
+    r"^\s*(?=[^.!?]*(?:пример\w*|конфигураци\w*|yaml|json|sql|команд\w*)\b)"
+    r"(?=[^.!?]*(?:придумай|сгенерируй|сочини|составь)\b)"
+    r"[^.!?]*[.!?]*\s*$",
     re.IGNORECASE,
 )
 _CROSS_PRODUCT_REQUEST = re.compile(
@@ -644,8 +662,8 @@ _EXTERNAL_ACTION_REQUEST = re.compile(
 )
 
 _EXTERNAL_ACTION_ANSWER = (
-    "У меня нет информации для выполнения такой просьбы. Я могу помочь только "
-    "с вопросами по текущей базе знаний."
+    "Этот запрос не относится к темам базы знаний. Я могу помочь с вопросами "
+    "о продуктах, инструментах и процессах, которые в ней описаны."
 )
 _KB_ACTION_LIMITATION = (
     "Я не могу выполнить это действие в системе за вас, но могу помочь по "
@@ -656,6 +674,17 @@ _ACTION_DELEGATION_ANSWER = (
     "настройки или запускать процессы. Могу провести вас по инструкции шаг за "
     "шагом и помочь проверить результат каждого шага."
 )
+
+
+def _kb_action_without_instruction(instruction_query: str) -> str:
+    operation = instruction_query.strip().rstrip("?!. ")
+    return (
+        f"{_KB_ACTION_LIMITATION}\n\n"
+        "В базе знаний не нашлась документированная инструкция по операции "
+        f"«{operation}». Я не буду придумывать шаги. Если операция относится к "
+        "конкретному продукту или системе, укажите её название — я повторю поиск "
+        "в нужном разделе."
+    )
 
 # Auto-mode internal retrieval width (independent of any stored `limit`): the
 # Answer shapes that need a wider window than a top-k slice (see `_build_auto`).
@@ -1439,7 +1468,10 @@ async def _build_auto(
     )
     hidden: dict[str, Any] = {"condense": condense_report, "grader": None}
     intent = condensed.intent
-    alias_subject = rag_pipeline.transliterated_technical_subject(query)
+    explicit_subject = (
+        rag_pipeline.transliterated_technical_subject(query)
+        or rag_pipeline.feature_container_subject(query)
+    )
     if completeness_query:
         intent = "kb_question"
         rq = completeness_query
@@ -1460,10 +1492,10 @@ async def _build_auto(
             hidden_calls=hidden,
         )
     else:
-        if intent == rag_pipeline.CONTEXT_CLARIFICATION_INTENT and alias_subject:
-            # A known phonetic product spelling is an explicit subject, not an
-            # ambiguous reference. This also protects the first question after
-            # a different active topic from being tied to that old product.
+        if intent == rag_pipeline.CONTEXT_CLARIFICATION_INTENT and explicit_subject:
+            # A known product spelling in either script is an explicit subject,
+            # not an ambiguous reference. This also protects the first question
+            # after a different active topic from being tied to that old product.
             intent = "kb_question"
             rq = rag_pipeline.canonicalize_technical_names(query)
         else:
@@ -1471,7 +1503,7 @@ async def _build_auto(
         scope = condensed.scope
         shape = condensed.shape
         context_subject = (
-            alias_subject or requested_description_subject or condensed.subject
+            explicit_subject or requested_description_subject or condensed.subject
         )
     dependent_on_active = bool(
         active_subject and rag_pipeline.needs_history_resolution(query)
@@ -1932,7 +1964,7 @@ async def _build_auto(
     # follow-ups use a clean canonical topic rather than the query's case form.
     resolved_context_subject = (
         inferred_context_subject
-        if requested_description_subject and inferred_context_subject and not alias_subject
+        if requested_description_subject and inferred_context_subject and not explicit_subject
         else context_subject or inferred_context_subject
     )
     reset_answer_history = bool(
@@ -2215,7 +2247,17 @@ async def build_rag_context(
             standalone_question=query,
             answer_override=rag_pipeline.CONTEXT_CLARIFICATION_ANSWER,
         )
-    if _CROSS_PRODUCT_REQUEST.fullmatch(query_text):
+    if _INVENT_EXAMPLE_REQUEST.fullmatch(query_text):
+        return RagContext(
+            intent="kb_question",
+            standalone_question=query,
+            answer_override=_NO_INVENTED_EXAMPLE,
+        )
+    if _CROSS_PRODUCT_REQUEST.fullmatch(
+        query_text
+    ) or rag_pipeline.requests_cross_product_transfer(
+        query_text, (active_context or {}).get("subject")
+    ):
         return RagContext(
             intent=rag_pipeline.CONTEXT_CLARIFICATION_INTENT,
             standalone_question=query,
@@ -2247,6 +2289,10 @@ async def build_rag_context(
     mode = str(rcfg.get("mode", "auto"))
     if mode == "auto":
         instruction_query = rag_pipeline.kb_action_instruction_query(query_text)
+        if instruction_query:
+            instruction_query = rag_pipeline.canonicalize_technical_names(
+                instruction_query
+            )
         pipeline_query = instruction_query or query
         pipeline_messages = messages
         if instruction_query and messages:
@@ -2270,8 +2316,8 @@ async def build_rag_context(
         )
         if instruction_query:
             if context.answer_override:
-                context.answer_override = (
-                    f"{_KB_ACTION_LIMITATION}\n\n{context.answer_override}"
+                context.answer_override = _kb_action_without_instruction(
+                    instruction_query
                 )
             else:
                 context.answer_prefix = f"{_KB_ACTION_LIMITATION}\n\n"

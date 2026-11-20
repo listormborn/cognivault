@@ -659,6 +659,46 @@ def test_malformed_citations_accepts_supported_variants(text, expected):
     assert chat_routes._malformed_citations(text) == expected
 
 
+def test_explicit_link_request_gets_the_cited_confluence_page():
+    sources = [
+        {
+            "n": 1,
+            "title": "Соседняя страница",
+            "url": "https://confluence.example/pages/1",
+        },
+        {
+            "n": 2,
+            "title": "Инструкция Fincert Enricher",
+            "url": "https://confluence.example/pages/2",
+        },
+    ]
+
+    answer = chat_routes._append_requested_source_links(
+        "Как работать с Fincert Enricher? Дай ссылку на инструкцию.",
+        "Используйте инструкцию [Источник 2].",
+        sources,
+    )
+
+    assert "[Инструкция Fincert Enricher ↗](https://confluence.example/pages/2)" in answer
+    assert "pages/1" not in answer
+
+
+def test_source_url_is_not_appended_when_no_link_was_requested():
+    answer = chat_routes._append_requested_source_links(
+        "Как работать с Fincert Enricher?",
+        "Используйте инструкцию [Источник 1].",
+        [
+            {
+                "n": 1,
+                "title": "Инструкция",
+                "url": "https://confluence.example/pages/1",
+            }
+        ],
+    )
+
+    assert answer == "Используйте инструкцию [Источник 1]."
+
+
 # --------------------------------------------------------------------------- #
 # Интеграция: что реально уходит в GigaChat
 # --------------------------------------------------------------------------- #

@@ -674,6 +674,8 @@ def test_context_subject_matching_supports_morphology_and_short_acronyms():
         ("Как работает яфка?", "Как работает YAFCA?"),
         ("Где описан дата лайнедж?", "Где описан Data Lineage?"),
         ("Есть ли библиотеки фиче стор?", "Есть ли библиотеки Feature Store?"),
+        ("Как проиндексировать вольт?", "Как проиндексировать CogniVault?"),
+        ("Переиндексируй волт", "Переиндексируй CogniVault"),
     ],
 )
 def test_russian_phonetic_product_names_are_canonicalized(question, expected):
@@ -691,6 +693,40 @@ def test_russian_product_subject_matches_english_source_identity():
     assert rag_pipeline.source_matches_context_subject(
         "финцерт энричер", source
     )
+
+
+@pytest.mark.parametrize(
+    "question, expected",
+    [
+        ("Есть ли мониторинг в Fincert?", "Fincert"),
+        ("Есть ли мониторинг в финцерте?", "Fincert"),
+        ("Есть ли мониторинг в АРМ DS?", "АРМ DS"),
+        ("Как настроить YAFCA?", "YAFCA"),
+        ("Сравни Fincert и АРМ DS", None),
+    ],
+)
+def test_explicit_product_subject_is_script_independent(question, expected):
+    assert rag_pipeline.explicit_technical_subject(question) == expected
+
+
+@pytest.mark.parametrize(
+    "question, expected",
+    [
+        ("Есть ли мониторинг в Fincert?", "Fincert"),
+        ("Поддерживает ли Fincert бизнес-мониторинг?", "Fincert"),
+        ("Есть ли мониторинг в АРМ DS?", "АРМ DS"),
+        (
+            "Какие стриминговые потоки существуют только в BitBucket?",
+            None,
+        ),
+        (
+            "В какие таблицы ClickHouse пишут потоки мониторинга?",
+            None,
+        ),
+    ],
+)
+def test_feature_container_boundary_is_not_any_technical_mention(question, expected):
+    assert rag_pipeline.feature_container_subject(question) == expected
 
 
 def test_multiple_product_names_do_not_choose_one_active_subject():
@@ -1422,8 +1458,8 @@ def test_external_action_is_refused_before_model_and_retrieval(monkeypatch, quer
     assert ctx.intent == "out_of_scope"
     assert ctx.answer_override == rag._EXTERNAL_ACTION_ANSWER
     assert ctx.answer_override == (
-        "У меня нет информации для выполнения такой просьбы. "
-        "Я могу помочь только с вопросами по текущей базе знаний."
+        "Этот запрос не относится к темам базы знаний. Я могу помочь с "
+        "вопросами о продуктах, инструментах и процессах, которые в ней описаны."
     )
     assert ctx.standalone_question == query
     assert ctx.sources == []
@@ -1436,6 +1472,7 @@ def test_external_action_is_refused_before_model_and_retrieval(monkeypatch, quer
         ("Поставь модель на дообучение", "Как поставить модель на дообучение?"),
         ("Можешь запустить синхронизацию Confluence?", "Как запустить синхронизацию Confluence?"),
         ("Переиндексируйте вольт", "Как переиндексировать вольт?"),
+        ("Проиндексируй волт", "Как проиндексировать волт?"),
         ("Выдай пользователю доступ", "Как выдать пользователю доступ?"),
     ],
 )
@@ -1523,7 +1560,29 @@ def test_execution_request_keeps_limitation_when_instruction_is_not_found(
 
     assert seen[0][0] == "Как запустить неизвестный процесс?"
     assert ctx.answer_override.startswith("Я не могу выполнить это действие")
-    assert "не нашёл информации" in ctx.answer_override
+    assert "не нашлась документированная инструкция" in ctx.answer_override
+    assert "не буду придумывать шаги" in ctx.answer_override
+
+
+def test_index_vault_request_canonicalizes_the_colloquial_product_name(monkeypatch):
+    seen = _install_retrieval(monkeypatch, [])
+
+    ctx = _build("Проиндексируй вольт")
+
+    assert seen[0][0] == "Как проиндексировать CogniVault?"
+    assert "операции «Как проиндексировать CogniVault»" in ctx.answer_override
+    assert "что такое" not in ctx.answer_override.casefold()
+
+
+def test_create_user_without_documented_steps_has_one_coherent_answer(monkeypatch):
+    seen = _install_retrieval(monkeypatch, [])
+
+    ctx = _build("Создай нового пользователя")
+
+    assert seen[0][0] == "Как создать нового пользователя?"
+    assert ctx.answer_override.count("Я не могу выполнить") == 1
+    assert "не нашлась документированная инструкция" in ctx.answer_override
+    assert "укажите её название" in ctx.answer_override
 
 
 def test_do_it_for_me_followup_is_not_searched(monkeypatch):
@@ -1556,6 +1615,14 @@ def test_do_it_for_me_followup_is_not_searched(monkeypatch):
             "Источники не нужны — напиши наиболее вероятный ответ.",
             rag_pipeline.CONTEXT_CLARIFICATION_ANSWER,
         ),
+        (
+            "Если точного примера нет, придумай наиболее вероятный.",
+            rag._NO_INVENTED_EXAMPLE,
+        ),
+        (
+            "Составь пример конфигурации из известных тебе параметров.",
+            rag._NO_INVENTED_EXAMPLE,
+        ),
         ("Возьми данные любого похожего продукта.", rag._NO_CROSS_PRODUCT),
         ("Придумай ссылку на подходящую страницу.", rag._NO_INVENTED_LINK),
     ],
@@ -1575,6 +1642,67 @@ def test_ungrounded_instruction_only_turns_stop_before_search(monkeypatch, query
     assert ctx.answer_override == expected
     assert ctx.sources == []
     assert seen == []
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Возьми пример YAFCA и адаптируй его для Fincert",
+        "Используй конфигурацию YAFCA для Fincert",
+        "Перенеси параметры Fincert в YAFCA",
+        "Сделай для Fincert такой же YAML, как в YAFCA",
+    ],
+)
+def test_cross_product_adaptation_is_refused_before_search(monkeypatch, question):
+    seen = _install_retrieval(
+        monkeypatch,
+        [
+            _frag(
+                1,
+                text="```yaml\nservice: fincert-enricher\n```",
+            )
+        ],
+    )
+
+    async def must_not_call_model(*args, **kwargs):
+        raise AssertionError("cross-product transfer must not call the model")
+
+    monkeypatch.setattr(
+        rag_pipeline.llm, "complete_json", must_not_call_model, raising=False
+    )
+
+    ctx = _build(question)
+
+    assert ctx.answer_override == rag._NO_CROSS_PRODUCT
+    assert ctx.sources == []
+    assert "yaml" not in ctx.answer_override.casefold()
+    assert seen == []
+
+
+def test_cross_product_adaptation_uses_the_active_topic(monkeypatch):
+    seen = _install_retrieval(monkeypatch, [_frag(1, text="готовый пример")])
+
+    ctx = _build(
+        "Адаптируй его для Fincert",
+        messages=[
+            {"role": "user", "content": "Покажи пример YAFCA"},
+            {"role": "assistant", "content": "Пример YAFCA..."},
+            {"role": "user", "content": "Адаптируй его для Fincert"},
+        ],
+        active_context={"subject": "YAFCA"},
+    )
+
+    assert ctx.answer_override == rag._NO_CROSS_PRODUCT
+    assert seen == []
+
+
+def test_comparison_is_not_mistaken_for_cross_product_adaptation():
+    assert (
+        rag_pipeline.requests_cross_product_transfer(
+            "Сравни конфигурации YAFCA и Fincert"
+        )
+        is False
+    )
 
 
 def test_ambiguous_inference_on_first_turn_asks_for_the_tool(monkeypatch):
@@ -1701,6 +1829,43 @@ def test_topic_switch_is_marked_for_answer_history_isolation(monkeypatch):
     assert "Fincert" not in ctx.standalone_question
     assert ctx.context_subject == "АРМ DS"
     assert ctx.reset_answer_history is True
+
+
+def test_feature_in_named_product_drops_same_named_feature_from_other_products(
+    monkeypatch,
+):
+    fincert = _frag(
+        1,
+        text="В Fincert описан технический мониторинг обработки сообщений.",
+    )
+    fincert.update(
+        path="Продукты/Fincert/Мониторинг.md",
+        title="Мониторинг Fincert",
+    )
+    arm_ds = _frag(
+        2,
+        text="Мониторинг моделей в АРМ DS показывает метрики качества.",
+    )
+    arm_ds.update(
+        path="Продукты/АРМ DS/Пользовательская инструкция. Мониторинг моделей.md",
+        title="Пользовательская инструкция. Мониторинг моделей",
+    )
+    seen = _install_retrieval(monkeypatch, [arm_ds, fincert])
+    prompts = _install_complete_json(
+        monkeypatch,
+        lambda prompt: {"grades": [{"id": 1, "score": 5}]},
+    )
+
+    ctx = _build("Есть ли мониторинг в Fincert?")
+
+    assert seen[0][0] == "Есть ли мониторинг в Fincert?"
+    assert ctx.context_subject == "Fincert"
+    assert [source["path"] for source in ctx.sources] == [
+        "Продукты/Fincert/Мониторинг.md"
+    ]
+    grader_prompt = prompts[-1]
+    assert "Мониторинг Fincert" in grader_prompt
+    assert "Мониторинг моделей в АРМ DS" not in grader_prompt
 
 
 @pytest.mark.parametrize(

@@ -56,6 +56,13 @@ _CITATION_LIKE_RE = re.compile(
     r"\[\s*Источник\w*\b[^\]]*\]", re.IGNORECASE
 )
 
+_SOURCE_LINK_REQUEST_RE = re.compile(
+    r"\b(?:ссылк\w*|url)\b|"
+    r"\b(?:дай(?:те)?|приведи(?:те)?|укажи(?:те)?|покажи(?:те)?)\b"
+    r"[^\n.!?]{0,60}\b(?:страниц\w*|источник\w*)\b",
+    re.IGNORECASE,
+)
+
 _SSE_HEADERS = {
     "Cache-Control": "no-cache",
     "X-Accel-Buffering": "no",
@@ -242,6 +249,56 @@ def _malformed_citations(text: str) -> list[str]:
         if not _CITATION_RE.fullmatch(match.group(0)):
             bad.append(match.group(0))
     return sorted(set(bad))
+
+
+def _append_requested_source_links(
+    question: str,
+    answer: str,
+    sources: list[dict[str, Any]],
+) -> str:
+    """Add real page URLs when the user explicitly asks for a link.
+
+    The answer model sees document paths and numbered citations, while durable
+    Confluence URLs are attached to ``sources`` later by the HTTP route.  That
+    separation is useful for grounding, but otherwise makes a model satisfy
+    «дай ссылку» with a vault path.  Resolve only source numbers the answer
+    actually cited; if it cited none, use a sole linked source but never guess
+    among several pages.
+    """
+    if not _SOURCE_LINK_REQUEST_RE.search(str(question or "")):
+        return answer
+
+    by_number: dict[int, dict[str, Any]] = {}
+    for source in sources or []:
+        try:
+            number = int(source.get("n"))
+        except (TypeError, ValueError):
+            continue
+        if _safe_page_url(source.get("url")):
+            by_number[number] = source
+
+    cited: list[int] = []
+    for match in _CITATION_RE.finditer(answer or ""):
+        for part in re.split(r"[,;]", match.group(1)):
+            part = part.strip()
+            if part.isdigit() and int(part) not in cited:
+                cited.append(int(part))
+    chosen = [by_number[number] for number in cited if number in by_number]
+    if not chosen and len(by_number) == 1:
+        chosen = list(by_number.values())
+
+    links: list[str] = []
+    for source in chosen:
+        url = str(source.get("url") or "").strip()
+        if not url or url in (answer or ""):
+            continue
+        title = str(source.get("title") or source.get("path") or "Источник").strip()
+        title = title.replace("[", "\\[").replace("]", "\\]")
+        links.append(f"[{title} ↗]({url})")
+    if not links:
+        return answer
+    label = "Ссылка на страницу" if len(links) == 1 else "Ссылки на страницы"
+    return f"{answer.rstrip()}\n\n{label}: " + "; ".join(links)
 
 
 def _linked_candidates(
@@ -675,7 +732,9 @@ async def chat(request: Request) -> Any:
                             context_chars = 0
                         elif sources:
                             await _enrich_source_urls(sources, url_index, cv)
-                        full_text = answer_override
+                        full_text = _append_requested_source_links(
+                            query, answer_override, sources
+                        )
                         finish_reason = _NO_CONTEXT_FINISH_REASON
                         log.info(
                             "chat %s: answer_override (intent=%s), генерация пропущена",
@@ -813,6 +872,18 @@ async def chat(request: Request) -> Any:
                 if hedge and full_text.strip():
                     full_text += f"\n\n{hedge}"
                     yield format_sse("token", {"text": f"\n\n{hedge}"})
+
+                # The model receives numbered evidence and vault paths, while
+                # real Confluence URLs are resolved by this route.  When the
+                # user explicitly asks for a link, append the URL of the page
+                # the answer cited instead of exposing an internal path only.
+                linked_text = _append_requested_source_links(
+                    query, full_text, sources
+                )
+                if linked_text != full_text:
+                    suffix = linked_text[len(full_text) :]
+                    full_text = linked_text
+                    yield format_sse("token", {"text": suffix})
 
                 # Серверная валидация цитат: номера вне 1..len(sources) — признак
                 # галлюцинации. Значение уезжает и в assistant-сообщение (history),
