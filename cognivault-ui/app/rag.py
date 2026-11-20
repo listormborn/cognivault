@@ -1486,9 +1486,10 @@ async def _build_auto(
     )
     hidden: dict[str, Any] = {"condense": condense_report, "grader": None}
     intent = condensed.intent
+    feature_container = rag_pipeline.feature_container_subject(query)
     explicit_subject = (
         rag_pipeline.transliterated_technical_subject(query)
-        or rag_pipeline.feature_container_subject(query)
+        or feature_container
     )
     if completeness_query:
         intent = "kb_question"
@@ -1690,7 +1691,13 @@ async def _build_auto(
             fragment
             for fragment in fragments
             if rag_pipeline.source_matches_context_subject(
-                context_subject, fragment
+                context_subject, fragment, answer_query
+            )
+            and (
+                not feature_container
+                or rag_pipeline.source_supports_feature_in_container(
+                    query, feature_container, fragment
+                )
             )
         ]
         if subject_fragments:

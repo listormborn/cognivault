@@ -712,6 +712,44 @@ def test_fincert_enricher_scope_excludes_unrelated_fincert_services():
     )
 
 
+def test_automatic_training_scope_includes_its_ctl_launch_instruction():
+    ctl = {
+        "path": (
+            "База знаний/"
+            "Инструкция по работе с CTL Лаборатории для дообучения.md"
+        ),
+        "title": "Инструкция по работе с CTL Лаборатории для дообучения",
+    }
+    assert not rag_pipeline.source_matches_context_subject(
+        "Автоматическое дообучение", ctl
+    ), "безымянное уточнение не должно ослаблять полную границу темы"
+    assert rag_pipeline.source_matches_context_subject(
+        "Автоматическое дообучение",
+        ctl,
+        "Как запустить поток дообучения?",
+    )
+    assert not rag_pipeline.source_matches_context_subject(
+        "Автоматическое дообучение",
+        {
+            "path": "Продукты/АРМ DS/Мониторинг моделей.md",
+            "title": "Мониторинг моделей",
+        },
+        "Как запустить поток дообучения?",
+    )
+
+
+def test_query_scoped_match_does_not_widen_elliptical_child_followup():
+    response_service = {
+        "path": "Продукты/Fincert/Сервис ответов на запросы.md",
+        "title": "Сервис ответов на запросы Fincert",
+    }
+    assert not rag_pipeline.source_matches_context_subject(
+        "Fincert Enricher",
+        response_service,
+        "Какие обязательные поля нужно заполнить? — Fincert Enricher",
+    )
+
+
 @pytest.mark.parametrize(
     "question, expected",
     [
@@ -1917,7 +1955,18 @@ def test_feature_in_named_product_drops_same_named_feature_from_other_products(
         path="Продукты/АРМ DS/Пользовательская инструкция. Мониторинг моделей.md",
         title="Пользовательская инструкция. Мониторинг моделей",
     )
-    seen = _install_retrieval(monkeypatch, [arm_ds, fincert])
+    broad_catalogue = _frag(
+        3,
+        text=(
+            "Fincert включает сервисы обработки запросов.\n\n"
+            "В АРМ DS доступен мониторинг моделей и метрик качества."
+        ),
+    )
+    broad_catalogue.update(
+        path="Продукты/Fincert/Обзор.md",
+        title="Обзор Fincert",
+    )
+    seen = _install_retrieval(monkeypatch, [arm_ds, broad_catalogue, fincert])
     prompts = _install_complete_json(
         monkeypatch,
         lambda prompt: {"grades": [{"id": 1, "score": 5}]},
@@ -1933,6 +1982,30 @@ def test_feature_in_named_product_drops_same_named_feature_from_other_products(
     grader_prompt = prompts[-1]
     assert "Мониторинг Fincert" in grader_prompt
     assert "Мониторинг моделей в АРМ DS" not in grader_prompt
+    assert "В АРМ DS доступен мониторинг моделей" not in grader_prompt
+
+
+def test_feature_container_requires_feature_and_product_in_one_evidence_unit():
+    broad = {
+        "path": "Продукты/Fincert/Обзор.md",
+        "title": "Обзор Fincert",
+        "text": (
+            "Fincert включает несколько сервисов, а в АРМ DS предусмотрен "
+            "мониторинг моделей."
+        ),
+    }
+    direct = {
+        "path": "Продукты/Fincert/Мониторинг.md",
+        "title": "Мониторинг Fincert",
+        "text": "Описан технический мониторинг обработки сообщений.",
+    }
+
+    assert not rag_pipeline.source_supports_feature_in_container(
+        "Есть ли мониторинг в Fincert?", "Fincert", broad
+    )
+    assert rag_pipeline.source_supports_feature_in_container(
+        "Есть ли мониторинг в Fincert?", "Fincert", direct
+    )
 
 
 @pytest.mark.parametrize(
@@ -2925,6 +2998,68 @@ def test_required_fields_followup_stays_inside_fincert_enricher(monkeypatch):
     assert "Fincert Enricher" in seen[0][0]
     assert [source["path"] for source in ctx.sources] == [enricher["path"]]
     assert "Сервис ответов на запросы" not in ctx.user_message["content"]
+
+
+def test_training_flow_launch_uses_related_ctl_instruction(monkeypatch):
+    ctl = _frag(
+        1,
+        text=(
+            "Чтобы запустить поток, откройте CTL, перейдите в «Потоки загрузки», "
+            "выберите категорию relearn и нажмите «Запустить поток»."
+        ),
+    )
+    ctl.update(
+        path=(
+            "База знаний/"
+            "Инструкция по работе с CTL Лаборатории для дообучения.md"
+        ),
+        title="Инструкция по работе с CTL Лаборатории для дообучения",
+    )
+    monitoring = _frag(
+        2,
+        text="Для мониторинга моделей запускается отдельный поток метрик.",
+    )
+    monitoring.update(
+        path="Продукты/АРМ DS/Мониторинг моделей.md",
+        title="Мониторинг моделей",
+    )
+    seen = _install_retrieval(monkeypatch, [ctl, monitoring])
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {
+            "intent": "kb_question",
+            "standalone_question": "Как запустить поток дообучения?",
+            "uses_history": True,
+            "context_subject": "Автоматическое дообучение",
+            "scope": "document",
+            "answer_shape": "procedure",
+        }
+        if _is_condense(prompt)
+        else {
+            "grades": [
+                {"id": 1, "score": 5},
+                {"id": 2, "score": 5},
+            ]
+        },
+    )
+
+    ctx = _build(
+        "Как запустить поток дообучения?",
+        [
+            {"role": "user", "content": "Что такое дообучение?"},
+            {
+                "role": "assistant",
+                "content": "Инструмент включает потоки sample и learn.",
+            },
+        ],
+        active_context={"subject": "Автоматическое дообучение"},
+    )
+
+    assert seen[0][0] == "Как запустить поток дообучения?"
+    assert ctx.context_subject == "Автоматическое дообучение"
+    assert [source["path"] for source in ctx.sources] == [ctl["path"]]
+    assert "Потоки загрузки" in ctx.user_message["content"]
+    assert "Мониторинг моделей" not in ctx.user_message["content"]
 
 
 # --------------------------------------------------------------------------- #

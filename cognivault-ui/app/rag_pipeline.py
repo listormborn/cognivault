@@ -1788,6 +1788,74 @@ def feature_container_subject(value: Any) -> str | None:
     return None
 
 
+def _feature_container_terms(question: str, subject: str) -> list[str]:
+    """Feature X explicitly queried in «есть ли X в Y?» / «Y поддерживает X?»"""
+    text = canonicalize_technical_names(question)
+    escaped = re.escape(subject)
+    patterns = (
+        rf"\b(?:есть|имеется|доступ\w*|предусмотр\w*)\s+ли\s+"
+        rf"(?P<feature>.+?)\s+(?:в|во|у)\s+{escaped}(?![\w])",
+        rf"\bподдержива\w*\s+ли\s+{escaped}(?![\w])\s+"
+        rf"(?P<feature>.+?)(?:[?.!]|$)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return _context_tokens(match.group("feature"))
+    return []
+
+
+def source_supports_feature_in_container(
+    question: str,
+    subject: str,
+    source: dict[str, Any],
+) -> bool:
+    """Whether one local evidence unit actually relates feature X to product Y.
+
+    A catalogue can mention Fincert in its heading and ARM DS monitoring in a
+    distant paragraph.  Whole-fragment bag-of-words would wrongly treat that as
+    evidence for «мониторинг в Fincert».  Require the product and feature to
+    co-occur in the source identity or in the same paragraph; this generalises
+    to every «есть/поддерживает ли X в Y?» question.
+    """
+    feature = _feature_container_terms(question, subject)
+    target = _context_tokens(canonicalize_technical_names(subject))
+    if not feature or not target:
+        return True
+    identity = " ".join(
+        str(source.get(key) or "") for key in ("title", "path", "section_path")
+    )
+    body = str(
+        source.get("section_text")
+        or source.get("text")
+        or source.get("content")
+        or ""
+    )
+    units = [identity, *re.split(r"\n\s*\n+", body)]
+    for unit in units:
+        named_products = explicit_technical_subjects(unit)
+        if any(
+            not context_subjects_overlap(subject, named)
+            for named in named_products
+        ):
+            # A catalogue sentence such as «Fincert …; в АРМ DS есть
+            # мониторинг» contains all keywords but attributes the feature to
+            # another named product.  It is not evidence for the requested pair.
+            continue
+        available = _context_tokens(canonicalize_technical_names(unit))
+        has_target = all(
+            any(_same_context_token(term, token) for token in available)
+            for term in target
+        )
+        has_feature = all(
+            any(_same_context_token(term, token) for token in available)
+            for term in feature
+        )
+        if has_target and has_feature:
+            return True
+    return False
+
+
 def _context_subject(value: Any) -> str | None:
     """Canonical topic name declared by condense, bounded for later filtering."""
     text = " ".join(canonicalize_technical_names(value).strip().split())
@@ -1887,8 +1955,22 @@ def context_subjects_overlap(left: str, right: str) -> bool:
     )
 
 
-def source_matches_context_subject(subject: str, source: dict[str, Any]) -> bool:
-    """Require every significant canonical-subject token in source identity."""
+def source_matches_context_subject(
+    subject: str,
+    source: dict[str, Any],
+    question: str | None = None,
+) -> bool:
+    """Keep a source inside the active topic without requiring one folder.
+
+    An elliptical follow-up (``question`` names none of the subject) remains
+    strict: the source identity must carry the whole active subject.  A
+    self-contained question may name a narrower lexical form, e.g. «поток
+    дообучения» for «Автоматическое дообучение»; then a separately located
+    instruction whose title also says «дообучение» is admissible.  Requiring
+    every subject term that is explicit in the question prevents a broad parent
+    token such as Fincert from admitting sibling services after condense has
+    restored the full child topic.
+    """
     wanted = _context_tokens(canonicalize_technical_names(subject))
     if not wanted:
         return False
@@ -1904,10 +1986,24 @@ def source_matches_context_subject(subject: str, source: dict[str, Any]) -> bool
     ):
         return True
     available = _context_tokens(canonical_identity)
-    return all(
+    if all(
         any(_same_context_token(term, token) for token in available)
         for term in wanted
-    )
+    ):
+        return True
+    if question:
+        query_tokens = _context_tokens(canonicalize_technical_names(question))
+        explicit = [
+            term
+            for term in wanted
+            if any(_same_context_token(term, token) for token in query_tokens)
+        ]
+        if explicit and all(
+            any(_same_context_token(term, token) for token in available)
+            for term in explicit
+        ):
+            return True
+    return False
 
 
 _GENERIC_IDENTITY_NAMES = {
