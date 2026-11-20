@@ -1576,9 +1576,12 @@ def test_execution_request_keeps_limitation_when_instruction_is_not_found(
     ctx = _build("Запусти неизвестный процесс")
 
     assert seen[0][0] == "Как запустить неизвестный процесс?"
-    assert ctx.answer_override.startswith("Я не могу выполнить это действие")
-    assert "не нашлась документированная инструкция" in ctx.answer_override
+    assert ctx.answer_override.startswith("Я не могу выполнить эту операцию")
+    assert "документированной инструкции" in ctx.answer_override
+    assert "не нашлось" in ctx.answer_override
     assert "не буду придумывать шаги" in ctx.answer_override
+    assert "могу помочь по инструкции" not in ctx.answer_override.casefold()
+    assert "\n\n" not in ctx.answer_override
 
 
 def test_index_vault_request_canonicalizes_the_colloquial_product_name(monkeypatch):
@@ -1587,8 +1590,33 @@ def test_index_vault_request_canonicalizes_the_colloquial_product_name(monkeypat
     ctx = _build("Проиндексируй вольт")
 
     assert seen[0][0] == "Как проиндексировать CogniVault?"
-    assert "операции «Как проиндексировать CogniVault»" in ctx.answer_override
+    assert "запросу «Как проиндексировать CogniVault»" in ctx.answer_override
     assert "что такое" not in ctx.answer_override.casefold()
+    assert "могу помочь по инструкции" not in ctx.answer_override.casefold()
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "Запусти синхронизацию Confluence",
+        "Поставь модель на дообучение",
+        "Выдай пользователю доступ",
+        "Создай нового пользователя",
+        "Проиндексируй вольт",
+    ],
+)
+def test_any_undocumented_operation_has_one_noncontradictory_answer(
+    monkeypatch, phrase
+):
+    _install_retrieval(monkeypatch, [])
+
+    ctx = _build(phrase)
+
+    assert ctx.answer_override.startswith("Я не могу выполнить эту операцию")
+    assert "документированной инструкции" in ctx.answer_override
+    assert "не буду придумывать шаги" in ctx.answer_override
+    assert "могу помочь по инструкции" not in ctx.answer_override.casefold()
+    assert "\n\n" not in ctx.answer_override
 
 
 def test_create_user_without_documented_steps_has_one_coherent_answer(monkeypatch):
@@ -1598,8 +1626,30 @@ def test_create_user_without_documented_steps_has_one_coherent_answer(monkeypatc
 
     assert seen[0][0] == "Как создать нового пользователя?"
     assert ctx.answer_override.count("Я не могу выполнить") == 1
-    assert "не нашлась документированная инструкция" in ctx.answer_override
+    assert "документированной инструкции" in ctx.answer_override
+    assert "не нашлось" in ctx.answer_override
     assert "укажите её название" in ctx.answer_override
+
+
+def test_do_it_followup_does_not_offer_a_missing_instruction(monkeypatch):
+    seen = _install_retrieval(monkeypatch, [_frag(1)])
+    previous = rag._kb_action_without_instruction(
+        "Как проиндексировать CogniVault?"
+    )
+
+    ctx = _build(
+        "Сделай это за меня",
+        messages=[
+            {"role": "user", "content": "Проиндексируй вольт"},
+            {"role": "assistant", "content": previous},
+            {"role": "user", "content": "Сделай это за меня"},
+        ],
+    )
+
+    assert ctx.intent == "action_delegation"
+    assert ctx.answer_override == rag._ACTION_DELEGATION_WITHOUT_INSTRUCTION_ANSWER
+    assert "провести вас по инструкции" not in ctx.answer_override.casefold()
+    assert seen == []
 
 
 def test_do_it_for_me_followup_is_not_searched(monkeypatch):

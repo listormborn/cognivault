@@ -674,17 +674,35 @@ _ACTION_DELEGATION_ANSWER = (
     "настройки или запускать процессы. Могу провести вас по инструкции шаг за "
     "шагом и помочь проверить результат каждого шага."
 )
+_ACTION_DELEGATION_WITHOUT_INSTRUCTION_ANSWER = (
+    "Я не могу выполнить это действие в системе за вас. Документированной "
+    "инструкции по этой операции в базе знаний не нашлось, поэтому я не буду "
+    "придумывать шаги."
+)
 
 
 def _kb_action_without_instruction(instruction_query: str) -> str:
     operation = instruction_query.strip().rstrip("?!. ")
     return (
-        f"{_KB_ACTION_LIMITATION}\n\n"
-        "В базе знаний не нашлась документированная инструкция по операции "
-        f"«{operation}». Я не буду придумывать шаги. Если операция относится к "
+        "Я не могу выполнить эту операцию в системе за вас, а документированной "
+        f"инструкции по запросу «{operation}» в базе знаний не нашлось. "
+        "Поэтому я не буду придумывать шаги. Если операция относится к "
         "конкретному продукту или системе, укажите её название — я повторю поиск "
         "в нужном разделе."
     )
+
+
+def _previous_answer_has_no_instruction(messages: list[dict[str, Any]] | None) -> bool:
+    """Whether the latest assistant turn already established missing steps."""
+    for message in reversed(messages or []):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        text = str(message.get("content") or "").casefold()
+        return (
+            "документированной инструкции" in text
+            and ("не нашлось" in text or "не нашлась" in text)
+        )
+    return False
 
 # Auto-mode internal retrieval width (independent of any stored `limit`): the
 # Answer shapes that need a wider window than a top-k slice (see `_build_auto`).
@@ -2239,7 +2257,11 @@ async def build_rag_context(
         return RagContext(
             intent="action_delegation",
             standalone_question=query,
-            answer_override=_ACTION_DELEGATION_ANSWER,
+            answer_override=(
+                _ACTION_DELEGATION_WITHOUT_INSTRUCTION_ANSWER
+                if _previous_answer_has_no_instruction(messages)
+                else _ACTION_DELEGATION_ANSWER
+            ),
         )
     if _UNSCOPED_GUESS_REQUEST.fullmatch(query_text):
         return RagContext(
