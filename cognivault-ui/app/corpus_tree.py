@@ -203,6 +203,39 @@ class SectionInventory:
     complete: bool
 
 
+@dataclass(frozen=True)
+class InstructionItem:
+    """One catalogue page that is explicitly instructional in title/summary."""
+
+    section: str
+    title: str
+
+
+@dataclass(frozen=True)
+class InstructionInventory:
+    """Corpus-wide inventory of practical how-to material."""
+
+    items: tuple[InstructionItem, ...]
+    complete: bool
+
+
+_INSTRUCTION_TITLE_RE = re.compile(
+    r"(?:\bинструкц\w*\b|\bруководств\w*\b|\bhow[\s-]*to\b|"
+    r"\bкак\s+(?:работать|настроить|подключить|запустить|получить|создать)\b|"
+    r"\b(?:начало|порядок)\s+работы\b|\bработа\s+с\b|"
+    r"\bполучени\w*\s+доступ\w*\b|"
+    r"\b(?:настройк|подключени|конфигураци|запуск|установк)\w*\b)",
+    re.IGNORECASE,
+)
+_INSTRUCTION_SUMMARY_RE = re.compile(
+    r"(?:\b(?:пользовательск|пошагов|практическ)\w*\s+инструкц\w*\b|"
+    r"\b(?:инструкц|руководств)\w*\b|"
+    r"\bописыва\w*\s+(?:порядок|процесс|шаги)\b|"
+    r"\bпорядок\s+(?:работы|настройки|подключения|запуска|получения)\b)",
+    re.IGNORECASE,
+)
+
+
 def _segments(path: str) -> list[str]:
     """Path → node names: separators normalised, extension dropped from the leaf."""
     parts = [s for s in path.replace("\\", "/").strip().split("/") if s and s != "."]
@@ -568,6 +601,48 @@ def top_level_titles(
     ]
 
 
+def suggested_topics(
+    data: dict[str, Any] | None, *, limit: int = 8
+) -> list[str]:
+    """Useful conversational topics rather than generic container headings."""
+    if limit <= 0:
+        return []
+    prepared = _prepare(data)
+    if prepared is None:
+        return []
+    generic = {"продукты", "база знаний", "инструменты", "документация"}
+    candidates: list[str] = []
+    def root_order(node: _Node) -> tuple[int, str]:
+        key = _section_key(node.name)
+        if key == "продукты":
+            priority = 0
+        elif key == "база знаний":
+            priority = 2
+        else:
+            priority = 1
+        return priority, node.name.casefold()
+
+    for root in sorted(prepared[0], key=root_order):
+        if _section_key(root.name) in generic and root.children:
+            candidates.extend(
+                child.name
+                for child in sorted(root.children, key=lambda node: node.name.casefold())
+            )
+        else:
+            candidates.append(root.name)
+    result: list[str] = []
+    seen: set[str] = set()
+    for name in candidates:
+        key = _section_key(name)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(name)
+        if len(result) >= limit:
+            break
+    return result
+
+
 def _section_key(value: Any) -> str:
     """Conservative identity key for an explicit section name."""
     return " ".join(
@@ -625,6 +700,59 @@ def find_section(
         total_items=len(names),
         complete=prepared[2] <= prepared[3],
     )
+
+
+def find_instructions(
+    data: dict[str, Any] | None,
+    *,
+    limit: int = 200,
+) -> InstructionInventory | None:
+    """Return every page whose catalogue metadata identifies it as a how-to.
+
+    A vector top-k cannot answer a corpus-wide inventory question: it returns
+    the few pages most similar to the wording.  The catalogue can, because it
+    contains every indexed path plus its short document annotation.  We use
+    both signals: explicit instructional titles are reliable, while annotations
+    catch practical pages with opaque names.  This classifies the material; it
+    never infers steps or contents that the catalogue does not state.
+    """
+    if limit <= 0:
+        return None
+    documents = active_documents(data)
+    if not documents:
+        return None
+    _roots, prefix = build(documents)
+    prefix_depth = len([part for part in prefix.split("/") if part])
+    items: list[InstructionItem] = []
+    seen: set[tuple[str, str]] = set()
+    for document in documents:
+        segments = _segments(str(document.get("path") or ""))
+        if not segments:
+            continue
+        title = str(document.get("title") or segments[-1]).strip()
+        summary = str(document.get("summary") or "").strip()
+        if not (
+            _INSTRUCTION_TITLE_RE.search(title)
+            or _INSTRUCTION_SUMMARY_RE.search(summary)
+        ):
+            continue
+        relative = segments[prefix_depth:] if prefix_depth < len(segments) else segments
+        section = relative[-2] if len(relative) >= 2 else "Общие материалы"
+        key = (section.casefold(), title.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(InstructionItem(section=section, title=title))
+    if not items:
+        return None
+    items.sort(key=lambda item: (item.section.casefold(), item.title.casefold()))
+    raw_count = len(catalog.documents_of(data))
+    raw_total = data.get("total") if isinstance(data, dict) else None
+    complete = (
+        (not isinstance(raw_total, int) or raw_total <= raw_count)
+        and len(items) <= limit
+    )
+    return InstructionInventory(items=tuple(items[:limit]), complete=complete)
 
 
 # --------------------------------------------------------------------------- #
@@ -689,3 +817,35 @@ async def section_inventory(
     except Exception:  # noqa: BLE001 — a chat refusal must remain available
         log.exception("не удалось найти раздел %r в каталоге", subject)
         return None
+
+
+async def instruction_inventory(
+    cv: dict[str, Any] | None = None,
+    *,
+    limit: int = 200,
+) -> InstructionInventory | None:
+    """Cached corpus-wide inventory of practical instructional material."""
+    data = await catalog.payload(cv)
+    if data is None:
+        return None
+    try:
+        return find_instructions(data, limit=limit)
+    except Exception:  # noqa: BLE001 — catalogue help must degrade to retrieval
+        log.exception("не удалось собрать перечень инструкций")
+        return None
+
+
+async def top_level_topics(
+    cv: dict[str, Any] | None = None,
+    *,
+    limit: int = 8,
+) -> list[str]:
+    """Real top-level topics for a conversational prompt, or an empty list."""
+    data = await catalog.payload(cv)
+    if data is None:
+        return []
+    try:
+        return suggested_topics(data, limit=limit)
+    except Exception:  # noqa: BLE001 — a greeting must remain available
+        log.exception("не удалось получить направления базы знаний")
+        return []

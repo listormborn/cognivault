@@ -888,6 +888,51 @@ def test_the_tree_contains_what_those_three_questions_ask_for(monkeypatch):
     assert content.count("Пользовательская инструкция.") >= 2
 
 
+def test_instruction_inventory_uses_titles_and_document_annotations():
+    documents = [
+        *_documents(),
+        _doc(
+            "Продукты/YAFCA/Начало работы.md",
+            summary="Описывает порядок подключения и запуска инструмента.",
+        ),
+        _doc(
+            "Продукты/Fincert/Обзор архитектуры.md",
+            summary="Компоненты сервиса и их назначение.",
+        ),
+    ]
+
+    inventory = corpus_tree.find_instructions(_payload(documents))
+
+    assert inventory is not None and inventory.complete is True
+    pairs = {(item.section, item.title) for item in inventory.items}
+    assert ("База знаний", "Инструкция по работе с BitBucket") in pairs
+    assert ("АРМ DS", "Пользовательская инструкция. Мониторинг моделей") in pairs
+    # Opaque title is admitted because its catalogue annotation explicitly
+    # describes a practical procedure.
+    assert ("YAFCA", "Начало работы") in pairs
+    assert ("Fincert", "Обзор архитектуры") not in pairs
+
+
+def test_instruction_inventory_reports_a_truncated_catalogue():
+    payload = _payload(_documents()[:5], total=100)
+
+    inventory = corpus_tree.find_instructions(payload)
+
+    assert inventory is not None
+    assert inventory.complete is False
+
+
+def test_suggested_topics_expand_generic_catalogue_containers():
+    topics = corpus_tree.suggested_topics(_payload(), limit=20)
+
+    assert "Продукты" not in topics
+    assert "База знаний" not in topics
+    assert "Fincert" in topics
+    assert "АРМ DS" in topics
+    assert "Инструкция по работе с CTL" in topics
+    assert topics.index("Fincert") < topics.index("Инструкция по работе с CTL")
+
+
 # --------------------------------------------------------------------------- #
 # ИЗМЕРЕНИЕ: 56 вопросов класса B не деградируют
 # --------------------------------------------------------------------------- #

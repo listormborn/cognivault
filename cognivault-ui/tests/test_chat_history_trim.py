@@ -226,7 +226,14 @@ def test_compute_budget_shrinks_as_history_grows():
 # --------------------------------------------------------------------------- #
 
 
-def _install_chat_stubs(monkeypatch, tmp_path, *, rag: bool):
+def _install_chat_stubs(
+    monkeypatch,
+    tmp_path,
+    *,
+    rag: bool,
+    reset_answer_history: bool = False,
+    answer_prefix: str | None = None,
+):
     """Замокать GigaChat/RAG и вернуть список перехваченных `messages`."""
     captured: list[list[dict]] = []
 
@@ -243,6 +250,8 @@ def _install_chat_stubs(monkeypatch, tmp_path, *, rag: bool):
                  "score": 0.9, "depth": "chunk"}
             ],
             context_chars=3,
+            reset_answer_history=reset_answer_history,
+            answer_prefix=answer_prefix,
         )
 
     monkeypatch.setattr(chat_routes, "resolve_paths", lambda request: _paths(tmp_path))
@@ -281,6 +290,51 @@ def test_chat_trims_long_history_before_sending(monkeypatch, tmp_path):
     roles = [m["role"] for m in sent[1:-1]]
     assert roles == ["user", "assistant"] * (len(roles) // 2)
     assert len(roles) % 2 == 0
+
+
+def test_topic_switch_excludes_old_dialogue_only_from_answer_generation(
+    monkeypatch, tmp_path
+):
+    captured = _install_chat_stubs(
+        monkeypatch, tmp_path, rag=True, reset_answer_history=True
+    )
+    messages = [
+        {"role": "user", "content": "Что такое бизнес-мониторинг Fincert?"},
+        {"role": "assistant", "content": "Описание Fincert."},
+        {"role": "user", "content": "А есть ли бизнес-мониторинг в АРМ DS?"},
+    ]
+
+    with TestClient(create_app()) as client:
+        response = client.post("/api/chat", json={"messages": messages, "rag": True})
+
+    assert response.status_code == 200
+    assert captured[0][0] == {"role": "system", "content": "правила ответа"}
+    assert len(captured[0]) == 2
+    assert "АРМ DS" in captured[0][-1]["content"]
+    assert all("Fincert" not in message["content"] for message in captured[0])
+
+
+def test_execution_limitation_is_emitted_before_generated_instruction(
+    monkeypatch, tmp_path
+):
+    prefix = "Я не могу выполнить это действие за вас.\n\n"
+    _install_chat_stubs(
+        monkeypatch, tmp_path, rag=True, answer_prefix=prefix
+    )
+
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/api/chat",
+            json={
+                "messages": [
+                    {"role": "user", "content": "Поставь модель на дообучение"}
+                ],
+                "rag": True,
+            },
+        )
+
+    tokens = [data["text"] for event, data in _parse_sse(response.text) if event == "token"]
+    assert "".join(tokens) == prefix + "ответ"
 
 
 def test_chat_without_rag_flag_still_uses_knowledge_base(monkeypatch, tmp_path):

@@ -514,6 +514,8 @@ async def chat(request: Request) -> Any:
 
     async def generator() -> AsyncIterator[str]:
         full_text = ""
+        model_text = ""
+        answer_prefix: str | None = None
         # Preserve the established topic on smalltalk, technical errors and
         # clarification turns.  A successful RAG turn may replace it below.
         next_context = dict(active_context or {})
@@ -652,6 +654,10 @@ async def chat(request: Request) -> Any:
                     head_block_kind = getattr(ctx, "head_block_kind", None)
                     head_block_chars = getattr(ctx, "head_block_chars", 0)
                     hidden_calls = getattr(ctx, "hidden_calls", None)
+                    reset_answer_history = bool(
+                        getattr(ctx, "reset_answer_history", False)
+                    )
+                    answer_prefix = getattr(ctx, "answer_prefix", None)
                     resolved_subject = getattr(ctx, "context_subject", None)
                     if isinstance(resolved_subject, str) and resolved_subject.strip():
                         next_context = {
@@ -732,9 +738,14 @@ async def chat(request: Request) -> Any:
                             )
                             # [rules-only system] + [история без последнего вопроса]
                             # + [user-сообщение с источниками и тем же вопросом].
+                            answer_history = (
+                                []
+                                if reset_answer_history
+                                else _without_last_user_turn(prior)
+                            )
                             send = [
                                 ctx.system_message,
-                                *_without_last_user_turn(prior),
+                                *answer_history,
                                 ctx.user_message,
                             ]
 
@@ -748,10 +759,15 @@ async def chat(request: Request) -> Any:
                         dropped,
                     )
 
+                if answer_prefix:
+                    full_text += answer_prefix
+                    yield format_sse("token", {"text": answer_prefix})
+
                 stream_started = time.perf_counter()
                 async for delta in llm.stream_chat(send, gcfg):
                     if "first_token" not in stages:
                         stages["first_token"] = _elapsed_ms(stream_started)
+                    model_text += delta
                     full_text += delta
                     yield format_sse("token", {"text": delta})
                 stages["stream"] = _elapsed_ms(stream_started)
@@ -764,7 +780,7 @@ async def chat(request: Request) -> Any:
                 # уведомление вместо пустого пузыря.
                 if (
                     getattr(answer_cfg, "last_finish_reason", None) == "length"
-                    and not full_text.strip()
+                    and not model_text.strip()
                 ):
                     retry_cfg = _retry_config(gcfg, giga_dict)
                     if retry_cfg is not None:
@@ -780,10 +796,11 @@ async def chat(request: Request) -> Any:
                         retry_started = time.perf_counter()
                         answer_cfg = retry_cfg
                         async for delta in llm.stream_chat(send, retry_cfg):
+                            model_text += delta
                             full_text += delta
                             yield format_sse("token", {"text": delta})
                         stages["retry"] = _elapsed_ms(retry_started)
-                    if not full_text.strip():
+                    if not model_text.strip():
                         notice = _EMPTY_COMPLETION_NOTICE
                         yield format_sse("notice", {"message": notice})
 

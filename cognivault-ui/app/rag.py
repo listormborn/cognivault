@@ -174,6 +174,9 @@ GROUNDING_GUARD = """Обязательные правила достоверн�
   только наличие раздела, называй его разделом и перечисляй его состав отдельно.
 - Если не запрошены подробности или полный перечень, дай краткое достаточное
   резюме и не пересказывай подряд все найденные фрагменты.
+- На вопрос «есть ли X в Y?» сначала прямо ответь, описан ли X для Y в
+  источниках. Не сравнивай Y с продуктом из предыдущих сообщений и не объясняй
+  различия между ними, если пользователь явно не попросил сравнение.
 - Каждый шаг последовательности пиши с новой строки и нумеруй как 1., 2., 3.
   Не объединяй несколько шагов в одной строке и не перезапускай нумерацию.
 - Называй хранилище нейтрально «база знаний». Не говори «ваша база знаний» или
@@ -343,6 +346,130 @@ _NO_ANSWER = (
     "надёжно ответить на этот вопрос. Попробуйте уточнить формулировку или "
     "указать название продукта, процесса или инструмента — я выполню поиск ещё раз."
 )
+
+_ASK_ASSISTANT_TO_PROMPT = re.compile(
+    r"^(?:(?:давай|хорошо|тогда)[,\s]+)?(?:задай|задайте)"
+    r"(?:\s+(?:мне|нам))?(?:\s+(?:вопрос|какой-нибудь вопрос))?[?!.]*$",
+    re.IGNORECASE,
+)
+_ASK_ASSISTANT_TO_SUGGEST_TOPIC = re.compile(
+    r"^(?:(?:давай|хорошо|тогда)[,\s]+)?(?:предложи|предложите)"
+    r"(?:\s+(?:сам(?:а|и)?|мне|нам))?(?:\s+(?:тему|вопрос|вариант))?"
+    r"[?!.]*$",
+    re.IGNORECASE,
+)
+_INSTRUCTION_CATALOG_REQUEST = re.compile(
+    r"^(?:(?:а|и)\s+)?(?:"
+    r"какие\s+ещ[её]\s+есть\s+инструкц(?:ии|ий)|"
+    r"какие\s+инструкц(?:ии|ий)\s+ещ[её]\s+(?:есть|доступны|имеются)|"
+    r"какие\s+инструкц(?:ии|ий)\s+(?:есть|доступны|имеются)\s+ещ[её]|"
+    r"(?:покажи(?:те)?|назови(?:те)?|перечисли(?:те)?|"
+    r"какие|какой\s+список)?\s*(?:все\s+|ещ[её]\s+)?"
+    r"(?:(?:пользовательские|технические|доступные)\s+)?инструкц(?:ии|ий)"
+    r"(?:\s+(?:есть|доступны|имеются))?(?:\s+в\s+базе(?:\s+знаний)?)?)"
+    r"[?!.]*$",
+    re.IGNORECASE,
+)
+_GENERIC_COLLECTION_MORE = re.compile(
+    r"^(?:(?:а|и)\s+)?(?:какие\s+)?(?:ещ[её]|другие)\s+"
+    r"(?:есть|доступны|имеются)?[?!.]*$|"
+    r"^(?:(?:а|и)\s+)?что\s+ещ[её]\s+(?:есть|доступно)[?!.]*$",
+    re.IGNORECASE,
+)
+
+
+def _last_assistant_text(messages: list[dict[str, Any]] | None) -> str:
+    for message in reversed(messages or []):
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            return " ".join(str(message.get("content") or "").split())
+    return ""
+
+
+def _asks_for_instruction_catalog(
+    question: str,
+    messages: list[dict[str, Any]] | None,
+) -> bool:
+    text = " ".join(str(question or "").strip().split())
+    if _INSTRUCTION_CATALOG_REQUEST.fullmatch(text):
+        return True
+    if not _GENERIC_COLLECTION_MORE.fullmatch(text):
+        return False
+    return bool(re.search(r"\bинструкц\w*\b", _last_assistant_text(messages), re.I))
+
+
+def _instruction_inventory_answer(
+    inventory: corpus_tree.InstructionInventory,
+) -> str:
+    count = len(inventory.items)
+    lines = [
+        f"Инструктивных материалов в каталоге базы знаний: {count}.",
+        (
+            "Я учитываю не только слово «инструкция» в заголовке, но и описание "
+            "страницы, если в нём явно указан порядок работы, настройки или запуска."
+        ),
+    ]
+    current = ""
+    for item in inventory.items:
+        if item.section != current:
+            current = item.section
+            lines.extend(("", f"### {current}"))
+        lines.append(f"- {item.title}")
+    if inventory.complete:
+        lines.extend(
+            (
+                "",
+                "Это полный перечень материалов, которые каталог явно определяет "
+                "как практические инструкции.",
+            )
+        )
+    else:
+        lines.extend(
+            (
+                "",
+                "Каталог получен не полностью, поэтому в перечне могут отсутствовать "
+                "некоторые материалы.",
+            )
+        )
+    lines.append(
+        "Могу открыть любой пункт и кратко объяснить, для какой задачи он нужен."
+    )
+    return "\n".join(lines)
+
+
+def _question_prompt_answer(topics: list[str]) -> str:
+    if topics:
+        choices = ", ".join(f"«{topic}»" for topic in topics)
+        return (
+            "Давайте начнём с контекста: с каким направлением вы сейчас "
+            f"работаете — {choices} или с другим разделом базы знаний?"
+        )
+    return (
+        "Давайте начнём с контекста: с каким продуктом, инструментом или "
+        "процессом из базы знаний вы сейчас работаете?"
+    )
+
+
+def _topic_suggestion_answer(topics: list[str]) -> str:
+    if topics:
+        return (
+            f"Предлагаю начать с темы «{topics[0]}». Что именно хотите узнать: "
+            "общее назначение или порядок работы?"
+        )
+    return (
+        "Предлагаю начать с продукта или инструмента, с которым вы сейчас "
+        "работаете. Напишите его название — я найду описание или инструкцию."
+    )
+
+
+def _topic_catalog_answer(topics: list[str]) -> str:
+    if not topics:
+        return (
+            "Уточните, пожалуйста, интересуют продукты, инструменты, процессы "
+            "или инструкции по работе?"
+        )
+    return "Основные направления базы знаний:\n" + "\n".join(
+        f"- {topic}" for topic in topics
+    )
 
 def _section_inventory_answer(
     inventory: corpus_tree.SectionInventory,
@@ -520,6 +647,15 @@ _EXTERNAL_ACTION_ANSWER = (
     "У меня нет информации для выполнения такой просьбы. Я могу помочь только "
     "с вопросами по текущей базе знаний."
 )
+_KB_ACTION_LIMITATION = (
+    "Я не могу выполнить это действие в системе за вас, но могу помочь по "
+    "инструкции из базы знаний."
+)
+_ACTION_DELEGATION_ANSWER = (
+    "Я не могу самостоятельно выполнять действия в системах, изменять "
+    "настройки или запускать процессы. Могу провести вас по инструкции шаг за "
+    "шагом и помочь проверить результат каждого шага."
+)
 
 # Auto-mode internal retrieval width (independent of any stored `limit`): the
 # Answer shapes that need a wider window than a top-k slice (see `_build_auto`).
@@ -625,6 +761,12 @@ class RagContext:
       never reached — a meta turn, or a turn that ended before retrieval.
       Telemetry only: ``grades`` of ``None`` already tell the answer path the
       reranker was dead, this says WHY (which batch, which error, which model).
+    * ``reset_answer_history`` — the current turn switched to an unrelated
+      product. The chat remains persisted in full, but generation receives only
+      the current sources/question so an old topic cannot trigger a comparison.
+    * ``answer_prefix`` — deterministic capability boundary emitted before a
+      generated how-to answer when the user asked the assistant to execute the
+      operation itself.
     """
 
     system_message: dict[str, Any] | None = None
@@ -646,6 +788,8 @@ class RagContext:
     hidden_calls: dict[str, Any] = field(
         default_factory=lambda: {"condense": None, "grader": None}
     )
+    reset_answer_history: bool = False
+    answer_prefix: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -1186,6 +1330,56 @@ async def _build_auto(
         (active_context or {}).get("subject")
     ).strip()
     completeness_query: str | None = None
+
+    if _ASK_ASSISTANT_TO_SUGGEST_TOPIC.fullmatch(query.strip()):
+        topics = await corpus_tree.top_level_topics(cv, limit=6)
+        return RagContext(
+            intent="smalltalk",
+            standalone_question=query,
+            answer_override=_topic_suggestion_answer(topics),
+        )
+
+    # Conversational hand-off after «нужна помощь».  A bare «задай» is an
+    # instruction to continue the dialogue, not a knowledge-base search query.
+    # Ground the offered choices in the live catalogue so the assistant neither
+    # invents a topic nor happens to expose only two retrieved pages.
+    if _ASK_ASSISTANT_TO_PROMPT.fullmatch(query.strip()):
+        topics = await corpus_tree.top_level_topics(cv, limit=6)
+        return RagContext(
+            intent="smalltalk",
+            standalone_question=query,
+            answer_override=_question_prompt_answer(topics),
+        )
+
+    # «Какие инструкции есть?» is an inventory question.  Vector retrieval is
+    # intentionally the wrong primitive here: its top-k is a relevance sample,
+    # not an exhaustive corpus listing.  The same branch recognises «какие ещё
+    # есть?» when the immediately preceding answer was explicitly about
+    # instructions, so the collection type survives the short follow-up.
+    if _asks_for_instruction_catalog(query, messages):
+        inventory = await corpus_tree.instruction_inventory(cv)
+        if inventory:
+            return RagContext(
+                intent=_META_INTENT,
+                standalone_question="Какие инструкции есть в базе знаний?",
+                answer_override=_instruction_inventory_answer(inventory),
+                scope=corpus_scope.CORPUS_SCOPE,
+            )
+
+    # If the assistant has just offered real catalogue directions, «какие ещё
+    # есть?» asks for that collection, not for a product clarification.
+    previous_assistant = _last_assistant_text(messages)
+    if (
+        _GENERIC_COLLECTION_MORE.fullmatch(query.strip())
+        and re.search(r"\b(?:направлени|раздел)\w*\b", previous_assistant, re.I)
+    ):
+        topics = await corpus_tree.top_level_topics(cv, limit=20)
+        return RagContext(
+            intent=_META_INTENT,
+            standalone_question="Какие направления есть в базе знаний?",
+            answer_override=_topic_catalog_answer(topics),
+            scope=corpus_scope.CORPUS_SCOPE,
+        )
 
     # 0a. A question about the base itself, recognised by anchored patterns —
     # zero model calls, and therefore the only step that works on the FIRST turn,
@@ -1741,6 +1935,13 @@ async def _build_auto(
         if requested_description_subject and inferred_context_subject and not alias_subject
         else context_subject or inferred_context_subject
     )
+    reset_answer_history = bool(
+        active_subject
+        and resolved_context_subject
+        and not rag_pipeline.context_subjects_overlap(
+            active_subject, resolved_context_subject
+        )
+    )
 
     if topic_opening_subject:
         return RagContext(
@@ -1856,6 +2057,7 @@ async def _build_auto(
         head_block_kind=head_kind,
         head_block_chars=len(corpus or ""),
         hidden_calls=hidden,
+        reset_answer_history=reset_answer_history,
     )
 
 
@@ -1998,6 +2200,15 @@ async def build_rag_context(
     tracking the shipped prompt.
     """
     query_text = str(query or "")
+    if (
+        rag_pipeline.requests_action_delegation(query_text)
+        and rag_pipeline.has_kb_action_context(query_text, messages)
+    ):
+        return RagContext(
+            intent="action_delegation",
+            standalone_question=query,
+            answer_override=_ACTION_DELEGATION_ANSWER,
+        )
     if _UNSCOPED_GUESS_REQUEST.fullmatch(query_text):
         return RagContext(
             intent=rag_pipeline.CONTEXT_CLARIFICATION_INTENT,
@@ -2035,13 +2246,34 @@ async def build_rag_context(
 
     mode = str(rcfg.get("mode", "auto"))
     if mode == "auto":
-        return await _build_auto(
-            query,
+        instruction_query = rag_pipeline.kb_action_instruction_query(query_text)
+        pipeline_query = instruction_query or query
+        pipeline_messages = messages
+        if instruction_query and messages:
+            pipeline_messages = [dict(message) for message in messages]
+            for message in reversed(pipeline_messages):
+                if (
+                    isinstance(message, dict)
+                    and message.get("role") == "user"
+                    and str(message.get("content") or "").strip() == query_text.strip()
+                ):
+                    message["content"] = instruction_query
+                    break
+        context = await _build_auto(
+            pipeline_query,
             rcfg,
             gcfg or {},
-            messages,
+            pipeline_messages,
             cvcfg,
             prompts,
             active_context,
         )
+        if instruction_query:
+            if context.answer_override:
+                context.answer_override = (
+                    f"{_KB_ACTION_LIMITATION}\n\n{context.answer_override}"
+                )
+            else:
+                context.answer_prefix = f"{_KB_ACTION_LIMITATION}\n\n"
+        return context
     return await _build_legacy(query, rcfg, cvcfg, prompts)

@@ -1431,6 +1431,125 @@ def test_external_action_is_refused_before_model_and_retrieval(monkeypatch, quer
 
 
 @pytest.mark.parametrize(
+    "phrase, expected",
+    [
+        ("Поставь модель на дообучение", "Как поставить модель на дообучение?"),
+        ("Можешь запустить синхронизацию Confluence?", "Как запустить синхронизацию Confluence?"),
+        ("Переиндексируйте вольт", "Как переиндексировать вольт?"),
+        ("Выдай пользователю доступ", "Как выдать пользователю доступ?"),
+    ],
+)
+def test_kb_operations_are_rewritten_as_instruction_queries(phrase, expected):
+    assert rag_pipeline.kb_action_instruction_query(phrase) == expected
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "Создай пример YAML",
+        "Создай инструкцию",
+        "Как поставить модель на дообучение?",
+        "Расскажи, как запустить синхронизацию",
+    ],
+)
+def test_content_or_informational_requests_are_not_execution_requests(phrase):
+    assert rag_pipeline.kb_action_instruction_query(phrase) is None
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "Сделай это за меня",
+        "Можешь выполнить за меня?",
+        "Запусти это сам",
+        "Тогда настрой сама",
+        "Выполни это",
+    ],
+)
+def test_action_delegation_followups_are_recognized(phrase):
+    assert rag_pipeline.requests_action_delegation(phrase) is True
+
+
+def test_generic_do_it_does_not_become_an_operation_after_content_offer():
+    assert rag_pipeline.has_kb_action_context(
+        "Сделай это",
+        [
+            {"role": "user", "content": "Можешь оформить ответ списком?"},
+            {"role": "assistant", "content": "Да, могу изменить формат ответа."},
+            {"role": "user", "content": "Сделай это"},
+        ],
+    ) is False
+
+
+def test_generic_do_it_keeps_the_preceding_operational_context():
+    assert rag_pipeline.has_kb_action_context(
+        "Сделай это за меня",
+        [
+            {"role": "user", "content": "Как поставить модель на дообучение?"},
+            {"role": "assistant", "content": "Откройте АРМ DS..."},
+            {"role": "user", "content": "Сделай это за меня"},
+        ],
+    ) is True
+
+
+def test_execution_request_gets_capability_boundary_and_instruction(monkeypatch):
+    hit = _frag(
+        1,
+        text="Для дообучения откройте АРМ DS и заполните конфигурацию модели.",
+    )
+    hit.update(
+        path="Продукты/АРМ DS/Пользовательская инструкция. Автоматическое дообучение.md",
+        title="Пользовательская инструкция. Автоматическое дообучение",
+    )
+    seen = _install_retrieval(monkeypatch, [hit])
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {"grades": [{"id": 1, "score": 5}]},
+    )
+
+    ctx = _build("Поставь модель на дообучение")
+
+    assert seen[0][0] == "Как поставить модель на дообучение?"
+    assert ctx.answer_prefix.startswith("Я не могу выполнить это действие")
+    assert ctx.sources
+
+
+def test_execution_request_keeps_limitation_when_instruction_is_not_found(
+    monkeypatch,
+):
+    seen = _install_retrieval(monkeypatch, [])
+
+    ctx = _build("Запусти неизвестный процесс")
+
+    assert seen[0][0] == "Как запустить неизвестный процесс?"
+    assert ctx.answer_override.startswith("Я не могу выполнить это действие")
+    assert "не нашёл информации" in ctx.answer_override
+
+
+def test_do_it_for_me_followup_is_not_searched(monkeypatch):
+    seen = _install_retrieval(monkeypatch, [_frag(1)])
+
+    async def must_not_call_model(*args, **kwargs):
+        raise AssertionError("delegation refusal must not call the model")
+
+    monkeypatch.setattr(
+        rag_pipeline.llm, "complete_json", must_not_call_model, raising=False
+    )
+    ctx = _build(
+        "Сделай это за меня",
+        messages=[
+            {"role": "user", "content": "Как поставить модель на дообучение?"},
+            {"role": "assistant", "content": "Откройте АРМ DS..."},
+            {"role": "user", "content": "Сделай это за меня"},
+        ],
+    )
+
+    assert ctx.intent == "action_delegation"
+    assert "не могу самостоятельно выполнять действия" in ctx.answer_override
+    assert seen == []
+
+
+@pytest.mark.parametrize(
     "query, expected",
     [
         (
@@ -1501,6 +1620,87 @@ def test_expansion_followups_require_history_resolution(question):
 )
 def test_self_contained_conditions_and_comparisons_do_not_borrow_old_topic(question):
     assert rag_pipeline.needs_history_resolution(question) is False
+
+
+def test_fully_named_new_subject_cannot_be_rewritten_as_old_topic_comparison(
+    monkeypatch,
+):
+    question = "А есть ли бизнес-мониторинг в арм дс?"
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {
+            "intent": "kb_question",
+            "standalone_question": (
+                "Чем бизнес-мониторинг в АРМ DS отличается от Fincert?"
+            ),
+            "uses_history": True,
+            "context_subject": "АРМ DS",
+            "scope": "document",
+            "answer_shape": "fact",
+        },
+    )
+
+    result = asyncio.run(
+        rag_pipeline.condense(
+            question,
+            [
+                {"role": "user", "content": "Что такое бизнес-мониторинг Fincert?"},
+                {"role": "assistant", "content": "Описание Fincert."},
+                {"role": "user", "content": question},
+            ],
+            {},
+            {},
+            active_context={"subject": "Fincert"},
+        )
+    )
+
+    assert result.question == question
+    assert result.subject == "АРМ DS"
+    assert "Fincert" not in result.question
+
+
+def test_topic_switch_is_marked_for_answer_history_isolation(monkeypatch):
+    hit = _frag(
+        1,
+        text=(
+            "В АРМ DS доступен мониторинг моделей. "
+            "Бизнес-показатели в этом разделе не описаны."
+        ),
+    )
+    hit.update(
+        path="Продукты/АРМ DS/Пользовательская инструкция. Мониторинг моделей.md",
+        title="Пользовательская инструкция. Мониторинг моделей",
+    )
+    seen = _install_retrieval(monkeypatch, [hit])
+
+    def handler(prompt):
+        if _is_condense(prompt):
+            return {
+                "intent": "kb_question",
+                "standalone_question": (
+                    "Чем бизнес-мониторинг АРМ DS отличается от Fincert?"
+                ),
+                "uses_history": True,
+                "context_subject": "АРМ DS",
+            }
+        return {"grades": [{"id": 1, "score": 5}]}
+
+    _install_complete_json(monkeypatch, handler)
+    question = "А есть ли бизнес-мониторинг в арм дс?"
+    ctx = _build(
+        question,
+        messages=[
+            {"role": "user", "content": "Что такое бизнес-мониторинг Fincert?"},
+            {"role": "assistant", "content": "Описание Fincert."},
+            {"role": "user", "content": question},
+        ],
+        active_context={"subject": "Fincert"},
+    )
+
+    assert seen[0][0] == "А есть ли бизнес-мониторинг в АРМ DS?"
+    assert "Fincert" not in ctx.standalone_question
+    assert ctx.context_subject == "АРМ DS"
+    assert ctx.reset_answer_history is True
 
 
 @pytest.mark.parametrize(
@@ -1947,6 +2147,155 @@ def test_first_turn_general_help_is_conversational_without_retrieval(
     assert ctx.system_message["content"] == rag.NO_RAG_SYSTEM_PROMPT
     assert ctx.user_message is None
     assert ctx.answer_override is None
+    assert seen == []
+
+
+def test_bare_ask_me_a_question_continues_the_dialogue_from_real_topics(
+    monkeypatch,
+):
+    seen = _install_retrieval(monkeypatch, [_frag(1)])
+
+    async def topics(cv=None, *, limit=8):
+        return ["Продукты", "База знаний", "АРМ DS"][:limit]
+
+    async def must_not_call_model(*args, **kwargs):
+        raise AssertionError("dialogue hand-off must not call the model")
+
+    monkeypatch.setattr(rag.corpus_tree, "top_level_topics", topics)
+    monkeypatch.setattr(
+        rag_pipeline.llm, "complete_json", must_not_call_model, raising=False
+    )
+
+    ctx = _build(
+        "задай",
+        messages=[
+            {"role": "user", "content": "нужна помощь"},
+            {"role": "assistant", "content": "Готов помочь. Задайте вопрос."},
+            {"role": "user", "content": "задай"},
+        ],
+    )
+
+    assert ctx.intent == "smalltalk"
+    assert "с каким направлением" in ctx.answer_override.lower()
+    assert "«АРМ DS»" in ctx.answer_override
+    assert seen == []
+
+
+@pytest.mark.parametrize("question", ["предложи", "Предложи сам", "Предложи тему"])
+def test_short_suggest_request_proposes_a_real_topic_without_search(
+    monkeypatch, question
+):
+    seen = _install_retrieval(monkeypatch, [_frag(1)])
+
+    async def topics(cv=None, *, limit=8):
+        return ["Fincert", "АРМ DS", "YAFCA"][:limit]
+
+    async def must_not_call_model(*args, **kwargs):
+        raise AssertionError("topic suggestion must not call the model")
+
+    monkeypatch.setattr(rag.corpus_tree, "top_level_topics", topics)
+    monkeypatch.setattr(
+        rag_pipeline.llm, "complete_json", must_not_call_model, raising=False
+    )
+
+    ctx = _build(
+        question,
+        messages=[
+            {"role": "user", "content": "привет, нужна помощь"},
+            {
+                "role": "assistant",
+                "content": "Могу помочь или самостоятельно предложить тему.",
+            },
+            {"role": "user", "content": question},
+        ],
+    )
+
+    assert ctx.intent == "smalltalk"
+    assert ctx.answer_override.startswith("Предлагаю начать с темы «Fincert»")
+    assert seen == []
+
+
+def test_global_instruction_question_uses_the_complete_catalogue(monkeypatch):
+    seen = _install_retrieval(monkeypatch, [_frag(1)])
+
+    async def inventory(cv=None, *, limit=200):
+        return rag.corpus_tree.InstructionInventory(
+            items=(
+                rag.corpus_tree.InstructionItem(
+                    "АРМ DS", "Пользовательская инструкция. Мониторинг моделей"
+                ),
+                rag.corpus_tree.InstructionItem(
+                    "YAFCA", "Начало работы и настройка"
+                ),
+            ),
+            complete=True,
+        )
+
+    monkeypatch.setattr(rag.corpus_tree, "instruction_inventory", inventory)
+
+    ctx = _build("Какие инструкции есть в базе знаний?")
+
+    assert ctx.intent == "meta"
+    assert "Инструктивных материалов в каталоге базы знаний: 2" in ctx.answer_override
+    assert "### АРМ DS" in ctx.answer_override
+    assert "- Начало работы и настройка" in ctx.answer_override
+    assert "полный перечень" in ctx.answer_override
+    assert seen == []
+
+
+def test_short_more_followup_keeps_the_instruction_collection(monkeypatch):
+    seen = _install_retrieval(monkeypatch, [_frag(1)])
+
+    async def inventory(cv=None, *, limit=200):
+        return rag.corpus_tree.InstructionInventory(
+            items=(
+                rag.corpus_tree.InstructionItem("Fincert", "Инструкция Enricher"),
+            ),
+            complete=True,
+        )
+
+    monkeypatch.setattr(rag.corpus_tree, "instruction_inventory", inventory)
+
+    ctx = _build(
+        "какие еще есть?",
+        messages=[
+            {"role": "user", "content": "Какие инструкции ты знаешь?"},
+            {
+                "role": "assistant",
+                "content": "Нашлись две инструкции: по Fincert и АРМ DS.",
+            },
+            {"role": "user", "content": "какие еще есть?"},
+        ],
+    )
+
+    assert ctx.intent == "meta"
+    assert "- Инструкция Enricher" in ctx.answer_override
+    assert seen == []
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Какие инструкции ещё есть?",
+        "Какие инструкции есть ещё?",
+        "А какие инструкции еще доступны?",
+    ],
+)
+def test_instruction_catalog_accepts_natural_word_order(monkeypatch, question):
+    seen = _install_retrieval(monkeypatch, [_frag(1)])
+
+    async def inventory(cv=None, *, limit=200):
+        return rag.corpus_tree.InstructionInventory(
+            items=(rag.corpus_tree.InstructionItem("АРМ DS", "Инструкция"),),
+            complete=True,
+        )
+
+    monkeypatch.setattr(rag.corpus_tree, "instruction_inventory", inventory)
+
+    ctx = _build(question)
+
+    assert ctx.intent == "meta"
+    assert "### АРМ DS" in ctx.answer_override
     assert seen == []
 
 

@@ -131,6 +131,124 @@ def is_conversational_turn(question: str) -> bool:
     return bool(_CONVERSATIONAL_TURN.fullmatch(text))
 
 
+_KB_ACTION_REQUEST = re.compile(
+    r"^(?:(?:пожалуйста|можешь|можете|сможешь|сможете)[,\s]+)?"
+    r"(?P<verb>поставь(?:те)?|поставить|запусти(?:те)?|запустить|"
+    r"перезапусти(?:те)?|перезапустить|останови(?:те)?|остановить|"
+    r"настрой(?:те)?|настроить|подключи(?:те)?|подключить|"
+    r"создай(?:те)?|создать|добавь(?:те)?|добавить|удали(?:те)?|удалить|"
+    r"загрузи(?:те)?|загрузить|выгрузи(?:те)?|выгрузить|"
+    r"синхронизируй(?:те)?|синхронизировать|"
+    r"переиндексируй(?:те)?|переиндексировать|обнови(?:те)?|обновить|"
+    r"разверни(?:те)?|развернуть|задеплой(?:те)?|задеплоить|"
+    r"выдай(?:те)?|выдать|открой(?:те)?|открыть|закрой(?:те)?|закрыть|"
+    r"включи(?:те)?|включить|выключи(?:те)?|выключить|"
+    r"измени(?:те)?|изменить|заполни(?:те)?|заполнить|"
+    r"зарегистрируй(?:те)?|зарегистрировать)\s+(?P<object>\S.+?)\s*[?!.]*$",
+    re.IGNORECASE,
+)
+_CONTENT_CREATION_OBJECT = re.compile(
+    r"^(?:мне\s+)?(?:пример|текст|ответ|описание|список|таблиц\w*|"
+    r"документ|инструкц\w*|код|yaml|json|sql)\b",
+    re.IGNORECASE,
+)
+_ACTION_DELEGATION = re.compile(
+    r"^(?:(?:а|тогда)\s+)?(?:(?:можешь|можете|сможешь|сможете)\s+)?(?:"
+    r"сделай(?:те)?|сделать|выполни(?:те)?|выполнить|"
+    r"запусти(?:те)?|запустить|настрой(?:те)?|настроить|"
+    r"поставь(?:те)?|поставить|подключи(?:те)?|подключить|"
+    r"синхронизируй(?:те)?|синхронизировать|"
+    r"переиндексируй(?:те)?|переиндексировать)\s+(?:это\s+)?"
+    r"(?:(?:сам(?:а|и)?|за\s+меня|вместо\s+меня))"
+    r"[?!.]*$|^(?:(?:а|тогда)\s+)?(?:сделай(?:те)?|выполни(?:те)?)\s+это[?!.]*$",
+    re.IGNORECASE,
+)
+
+_ACTION_INFINITIVES = {
+    "поставь": "поставить",
+    "запусти": "запустить",
+    "перезапусти": "перезапустить",
+    "останови": "остановить",
+    "настрой": "настроить",
+    "подключи": "подключить",
+    "создай": "создать",
+    "добавь": "добавить",
+    "удали": "удалить",
+    "загрузи": "загрузить",
+    "выгрузи": "выгрузить",
+    "синхронизируй": "синхронизировать",
+    "переиндексируй": "переиндексировать",
+    "обнови": "обновить",
+    "разверни": "развернуть",
+    "задеплой": "задеплоить",
+    "выдай": "выдать",
+    "открой": "открыть",
+    "закрой": "закрыть",
+    "включи": "включить",
+    "выключи": "выключить",
+    "измени": "изменить",
+    "заполни": "заполнить",
+    "зарегистрируй": "зарегистрировать",
+}
+_ACTION_INFINITIVES.update({value: value for value in tuple(_ACTION_INFINITIVES.values())})
+
+
+def kb_action_instruction_query(question: str) -> str | None:
+    """Turn a request to execute a KB operation into a how-to search query."""
+    text = " ".join(str(question or "").strip().split())
+    match = _KB_ACTION_REQUEST.fullmatch(text)
+    if not match or _CONTENT_CREATION_OBJECT.match(match.group("object")):
+        return None
+    verb = match.group("verb").casefold()
+    if verb.endswith("те"):
+        verb = verb[:-2]
+    infinitive = _ACTION_INFINITIVES.get(verb)
+    if not infinitive:
+        return None
+    obj = match.group("object").strip(" \t.,!?;:")
+    return f"Как {infinitive} {obj}?"
+
+
+def requests_action_delegation(question: str) -> bool:
+    """Whether the user asks the assistant to execute the referenced operation."""
+    text = " ".join(str(question or "").strip().split())
+    return bool(text and _ACTION_DELEGATION.fullmatch(text))
+
+
+_EXPLICIT_DELEGATED_OPERATION = re.compile(
+    r"\b(?:запусти|запустить|настрой|настроить|поставь|поставить|"
+    r"подключи|подключить|синхронизируй|синхронизировать|"
+    r"переиндексируй|переиндексировать)\b",
+    re.IGNORECASE,
+)
+_HOW_TO_OPERATION = re.compile(
+    r"\bкак\s+(?:поставить|запустить|перезапустить|остановить|настроить|"
+    r"подключить|создать|добавить|удалить|загрузить|выгрузить|"
+    r"синхронизировать|переиндексировать|обновить|развернуть|"
+    r"задеплоить|выдать|открыть|закрыть|включить|выключить|"
+    r"изменить|заполнить|зарегистрировать)\b",
+    re.IGNORECASE,
+)
+
+
+def has_kb_action_context(
+    question: str,
+    messages: list[dict[str, Any]] | None,
+) -> bool:
+    """Whether an elliptical delegation refers to an operational KB task."""
+    if _EXPLICIT_DELEGATED_OPERATION.search(str(question or "")):
+        return True
+    for message in reversed(messages or []):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        text = " ".join(str(message.get("content") or "").strip().split())
+        if not text or text == " ".join(str(question or "").strip().split()):
+            continue
+        if kb_action_instruction_query(text) or _HOW_TO_OPERATION.search(text):
+            return True
+    return False
+
+
 _TOPIC_OPENING_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
@@ -348,6 +466,11 @@ _CONDENSE_TASKS = """
   объект переключает активную тему; самодостаточный вопрос по всей базе её не
   использует. Если непонятно, относится ли реплика к активной теме, запроси
   уточнение вместо выбора наугад.
+- Если пользователь полностью называет новый объект («есть ли бизнес-мониторинг
+  в АРМ DS?» после разговора о Fincert), это переключение темы, а не сравнение.
+  Оставь вопрос про новый объект и не добавляй в standalone_question прежний
+  продукт. Сравнение допустимо только по явным словам «сравни», «отличается» или
+  «в чём разница».
 - Если объект вложен в более широкий продукт («Автоматическое дообучение» внутри
   «АРМ DS»), активной темой является самый конкретный объект. В следующем
   зависимом вопросе не заменяй его родительским продуктом и не ищи по соседним
@@ -1612,6 +1735,35 @@ def text_mentions_context_subject(text: str, subject: str) -> bool:
     )
 
 
+def text_fully_names_context_subject(text: str, subject: str) -> bool:
+    """Whether all significant tokens of ``subject`` are explicit in ``text``."""
+    available = _context_tokens(canonicalize_technical_names(text))
+    wanted = _context_tokens(canonicalize_technical_names(subject))
+    return bool(
+        available
+        and wanted
+        and all(
+            any(_same_context_token(term, token) for token in available)
+            for term in wanted
+        )
+    )
+
+
+def context_subjects_overlap(left: str, right: str) -> bool:
+    """Whether two subjects belong to the same named topic family."""
+    left_tokens = _context_tokens(canonicalize_technical_names(left))
+    right_tokens = _context_tokens(canonicalize_technical_names(right))
+    return bool(
+        left_tokens
+        and right_tokens
+        and any(
+            _same_context_token(a, b)
+            for a in left_tokens
+            for b in right_tokens
+        )
+    )
+
+
 def source_matches_context_subject(subject: str, source: dict[str, Any]) -> bool:
     """Require every significant canonical-subject token in source identity."""
     wanted = _context_tokens(canonicalize_technical_names(subject))
@@ -1788,6 +1940,7 @@ def _parse_condense(
         model_uses_history
         and subject
         and text_mentions_context_subject(question, subject)
+        and not text_fully_names_context_subject(question, subject)
     )
     if (
         intent == "kb_question"
