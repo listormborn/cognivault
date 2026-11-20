@@ -1587,7 +1587,10 @@ _TECHNICAL_NAME_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
         "Fincert Enricher",
     ),
     (
-        re.compile(r"(?<![\w])фин[цс]ерт(?:а|е|ом|у)?(?![\w])", re.IGNORECASE),
+        re.compile(
+            r"(?<![\w])фин[цс]ертр?(?:а|е|ом|у)?(?![\w])",
+            re.IGNORECASE,
+        ),
         "Fincert",
     ),
     (re.compile(r"(?<![\w])яфк(?:а|е|у|ой|и)?(?![\w])", re.IGNORECASE), "YAFCA"),
@@ -1627,6 +1630,18 @@ _TECHNICAL_NAME_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?<![\w])квадрант(?:а|е|ом|у)?(?![\w])", re.IGNORECASE), "Qdrant"),
 )
 
+# Small, controlled typo normalisation for high-frequency domain vocabulary.
+# This is deliberately not a general spell-checker: silently correcting an
+# arbitrary business term could change the user's question.  These variants
+# are unambiguous one-edit misspellings repeatedly seen in chat and are applied
+# before both retrieval and the product/feature boundary.
+_DOMAIN_TYPO_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(r"(?<![\w])монитринг(?P<ending>\w*)(?![\w])", re.IGNORECASE),
+        r"мониторинг\g<ending>",
+    ),
+)
+
 _CANONICAL_TECHNICAL_NAMES = tuple(
     sorted(
         {canonical for _, canonical in _TECHNICAL_NAME_RULES},
@@ -1658,7 +1673,10 @@ def _replace_technical_names(value: Any) -> tuple[str, list[str]]:
 
 def canonicalize_technical_names(value: Any) -> str:
     """Replace Russian phonetic product spellings with indexed names."""
-    return _replace_technical_names(value)[0]
+    text = str(value or "")
+    for pattern, replacement in _DOMAIN_TYPO_RULES:
+        text = pattern.sub(replacement, text)
+    return _replace_technical_names(text)[0]
 
 
 def transliterated_technical_subject(value: Any) -> str | None:
@@ -1842,7 +1860,12 @@ def source_supports_feature_in_container(
             # мониторинг» contains all keywords but attributes the feature to
             # another named product.  It is not evidence for the requested pair.
             continue
-        available = _context_tokens(canonicalize_technical_names(unit))
+        # Compound labels are common in page names (бизнес-мониторинг,
+        # REST-сервис).  Relation matching needs their meaningful components,
+        # while the broader context-token logic may still keep the compound as
+        # one identity token.
+        relation_text = re.sub(r"[-_.]+", " ", canonicalize_technical_names(unit))
+        available = _context_tokens(relation_text)
         has_target = all(
             any(_same_context_token(term, token) for token in available)
             for term in target

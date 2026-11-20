@@ -670,6 +670,7 @@ def test_context_subject_matching_supports_morphology_and_short_acronyms():
         ("Что такое финцерт энричер?", "Что такое Fincert Enricher?"),
         ("Расскажи про финсерт-энричер", "Расскажи про Fincert Enricher"),
         ("Что знаешь про финцерт?", "Что знаешь про Fincert?"),
+        ("Есть ли монитринг в финцертре?", "Есть ли мониторинг в Fincert?"),
         ("Расскажи про enricher", "Расскажи про Fincert Enricher"),
         ("Как работает яфка?", "Как работает YAFCA?"),
         ("Где описан дата лайнедж?", "Где описан Data Lineage?"),
@@ -2006,6 +2007,47 @@ def test_feature_container_requires_feature_and_product_in_one_evidence_unit():
     assert rag_pipeline.source_supports_feature_in_container(
         "Есть ли мониторинг в Fincert?", "Fincert", direct
     )
+
+
+@pytest.mark.parametrize(
+    ("question", "search_query"),
+    [
+        ("Есть ли мониторинг в Fincert?", "Есть ли мониторинг в Fincert?"),
+        ("Есть ли монитринг в финцертре?", "Есть ли мониторинг в Fincert?"),
+    ],
+)
+def test_fincert_monitoring_question_keeps_product_boundary(
+    monkeypatch, question, search_query
+):
+    fincert = _frag(
+        1,
+        text="Для Fincert описан бизнес-мониторинг обработки запросов.",
+    )
+    fincert.update(
+        path="Продукты/Fincert/Инструкция для бизнес-мониторинга Fincert.md",
+        title="Инструкция для бизнес-мониторинга Fincert",
+    )
+    arm_ds = _frag(
+        2,
+        text="Мониторинг моделей в АРМ DS показывает метрики качества.",
+    )
+    arm_ds.update(
+        path="Продукты/АРМ DS/Мониторинг моделей.md",
+        title="Мониторинг моделей",
+    )
+    seen = _install_retrieval(monkeypatch, [arm_ds, fincert])
+    prompts = _install_complete_json(
+        monkeypatch,
+        lambda prompt: {"grades": [{"id": 1, "score": 5}]},
+    )
+
+    ctx = _build(question)
+
+    assert seen[0][0] == search_query
+    assert ctx.context_subject == "Fincert"
+    assert [source["path"] for source in ctx.sources] == [fincert["path"]]
+    assert "бизнес-мониторинг" in prompts[-1]
+    assert "Мониторинг моделей в АРМ DS" not in prompts[-1]
 
 
 @pytest.mark.parametrize(
