@@ -695,6 +695,23 @@ def test_russian_product_subject_matches_english_source_identity():
     )
 
 
+def test_fincert_enricher_scope_excludes_unrelated_fincert_services():
+    assert not rag_pipeline.source_matches_context_subject(
+        "Fincert Enricher",
+        {
+            "path": "Продукты/Fincert/Сервис ответов на запросы.md",
+            "title": "Сервис ответов на запросы",
+        },
+    )
+    assert rag_pipeline.source_matches_context_subject(
+        "Fincert Enricher",
+        {
+            "path": "Продукты/Fincert/Fincert Playground/Инструкция.md",
+            "title": "Пользовательская инструкция. Fincert Playground CLI",
+        },
+    )
+
+
 @pytest.mark.parametrize(
     "question, expected",
     [
@@ -2798,6 +2815,66 @@ def test_generic_configuration_followup_keeps_narrow_child_topic(monkeypatch):
     assert "Автоматическое дообучение" in seen[0][0]
     assert [source["path"] for source in ctx.sources] == [training["path"]]
     assert "Мониторинг моделей" not in ctx.user_message["content"]
+
+
+def test_required_fields_followup_stays_inside_fincert_enricher(monkeypatch):
+    enricher = _frag(
+        1,
+        text="В конфигурации Fincert Enricher обязательны поля source и target.",
+    )
+    enricher.update(
+        path=(
+            "Продукты/Fincert/Fincert-enricher/"
+            "Пользовательская инструкция. FC-enricher v 2.1.md"
+        ),
+        title="Пользовательская инструкция. FC-enricher v 2.1",
+    )
+    responses = _frag(
+        2,
+        text="Для сервиса ответов на запросы обязательны поля request_id и status.",
+    )
+    responses.update(
+        path="Продукты/Fincert/Сервис ответов на запросы.md",
+        title="Сервис ответов на запросы",
+    )
+    seen = _install_retrieval(monkeypatch, [enricher, responses])
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: {
+            # Reproduce a bad broad rewrite from the hidden model.  Persisted
+            # state must keep the exact child tool as the source boundary.
+            "intent": "kb_question",
+            "standalone_question": "Какие обязательные поля есть в Fincert?",
+            "uses_history": True,
+            "context_subject": "Fincert",
+            "scope": "document",
+            "answer_shape": "list",
+        }
+        if _is_condense(prompt)
+        else {
+            "grades": [
+                {"id": 1, "score": 5},
+                {"id": 2, "score": 5},
+            ]
+        },
+    )
+
+    ctx = _build(
+        "Какие обязательные поля нужно заполнить?",
+        [
+            {"role": "user", "content": "Расскажи про Fincert Enricher"},
+            {
+                "role": "assistant",
+                "content": "Fincert Enricher обогащает данные.",
+            },
+        ],
+        active_context={"subject": "Fincert Enricher"},
+    )
+
+    assert ctx.context_subject == "Fincert Enricher"
+    assert "Fincert Enricher" in seen[0][0]
+    assert [source["path"] for source in ctx.sources] == [enricher["path"]]
+    assert "Сервис ответов на запросы" not in ctx.user_message["content"]
 
 
 # --------------------------------------------------------------------------- #

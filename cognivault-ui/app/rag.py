@@ -1516,7 +1516,7 @@ async def _build_auto(
         # of the search query even when the hidden model omitted or broadened
         # the subject.
         context_subject = active_subject
-        if not rag_pipeline.text_mentions_context_subject(rq, active_subject):
+        if not rag_pipeline.text_fully_names_context_subject(rq, active_subject):
             raw_query = rag_pipeline.canonicalize_technical_names(query).strip()
             rq = f"{raw_query} — {active_subject}"
     if (

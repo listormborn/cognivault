@@ -1635,11 +1635,15 @@ _CANONICAL_TECHNICAL_NAMES = tuple(
     )
 )
 
-# Some tools are documented across sibling pages under their parent product.
-# Scoping Fincert Enricher to pages whose title literally contains "Enricher"
-# would hide its Playground/CLI validation instructions.  The parent still
-# prevents cross-product mixing; the grader decides which Fincert page answers.
-_TECHNICAL_SUBJECT_PARENTS = {"Fincert Enricher": "Fincert"}
+# Some tools are documented across a small number of explicitly related sibling
+# pages.  Do not widen a child tool to its whole parent product: doing that for
+# Fincert Enricher admitted unrelated pages such as «Сервис ответов на запросы»
+# on an elliptical follow-up about mandatory fields.  Name the exceptional
+# siblings instead, while the normal token match continues to admit every page
+# whose own path/title contains Fincert Enricher.
+_TECHNICAL_SUBJECT_RELATED_SOURCES: dict[str, tuple[str, ...]] = {
+    "Fincert Enricher": ("Fincert Playground", "Playground CLI"),
+}
 
 
 def _replace_technical_names(value: Any) -> tuple[str, list[str]]:
@@ -1893,8 +1897,11 @@ def source_matches_context_subject(subject: str, source: dict[str, Any]) -> bool
     )
     canonical_subject = canonicalize_technical_names(subject)
     canonical_identity = canonicalize_technical_names(identity)
-    parent = _TECHNICAL_SUBJECT_PARENTS.get(canonical_subject)
-    if parent and text_mentions_context_subject(canonical_identity, parent):
+    related = _TECHNICAL_SUBJECT_RELATED_SOURCES.get(canonical_subject, ())
+    if any(
+        text_fully_names_context_subject(canonical_identity, sibling)
+        for sibling in related
+    ):
         return True
     available = _context_tokens(canonical_identity)
     return all(
