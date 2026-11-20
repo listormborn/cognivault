@@ -347,8 +347,13 @@ _NO_ANSWER = (
 def _section_inventory_answer(
     inventory: corpus_tree.SectionInventory,
 ) -> str:
+    location = (
+        "В базе знаний есть раздел"
+        if inventory.complete
+        else "В найденных материалах есть раздел или страница"
+    )
     lines = [
-        f"В базе знаний есть раздел «{inventory.name}», но общего описания "
+        f"{location} «{inventory.name}», но общего описания "
         f"«{inventory.name}» в документах не нашлось.",
         "Внутри раздела есть страницы о следующих продуктах, сервисах и материалах:",
         *(f"- {item}" for item in inventory.items),
@@ -356,15 +361,46 @@ def _section_inventory_answer(
     hidden = inventory.total_items - len(inventory.items)
     if hidden > 0:
         lines.append(f"- Ещё {hidden} элементов")
+    if not inventory.complete:
+        lines.append(
+            "Это перечень из найденной страницы; он может быть неполным."
+        )
     lines.append(
         "Могу отдельно найти описание или инструкцию по любому из этих пунктов."
     )
     return "\n".join(lines)
 
 
+def _section_completeness_answer(
+    inventory: corpus_tree.SectionInventory,
+) -> str:
+    if inventory.complete:
+        head = (
+            f"Да, это все дочерние страницы, которые сейчас есть в структуре "
+            f"раздела «{inventory.name}»:"
+        )
+        tail = "Других дочерних страниц в текущей структуре раздела нет."
+    else:
+        head = (
+            f"В доступной части структуры раздела «{inventory.name}» видны "
+            "следующие страницы:"
+        )
+        tail = (
+            "Каталог получен не полностью, поэтому утверждать, что это весь "
+            "раздел, нельзя."
+        )
+    lines = [head, *(f"- {item}" for item in inventory.items)]
+    hidden = inventory.total_items - len(inventory.items)
+    if hidden > 0:
+        lines.append(f"- Ещё {hidden} элементов")
+    lines.append(tail)
+    return "\n".join(lines)
+
+
 async def _no_answer_for(
     question: str,
     cv: dict[str, Any] | None = None,
+    fragments: list[dict[str, Any]] | None = None,
 ) -> str:
     subject = rag_pipeline.description_subject(question)
     if rag_pipeline.requests_tool_description(question):
@@ -372,6 +408,16 @@ async def _no_answer_for(
             inventory = await corpus_tree.section_inventory(subject, cv)
             if inventory:
                 return _section_inventory_answer(inventory)
+            items = rag_pipeline.navigation_items(fragments or [])
+            if items:
+                return _section_inventory_answer(
+                    corpus_tree.SectionInventory(
+                        name=subject,
+                        items=tuple(items),
+                        total_items=len(items),
+                        complete=False,
+                    )
+                )
         named = f" «{subject}»" if subject else " этого термина или объекта"
         return (
             f"К сожалению, в базе знаний не нашлось описания{named}. "
@@ -1136,6 +1182,10 @@ async def _build_auto(
     budget = _compute_budget(rcfg, gcfg, messages)
     topic_opening_subject = rag_pipeline.topic_opening_subject(query)
     requested_description_subject = rag_pipeline.description_subject(query)
+    active_subject = rag_pipeline.canonicalize_technical_names(
+        (active_context or {}).get("subject")
+    ).strip()
+    completeness_query: str | None = None
 
     # 0a. A question about the base itself, recognised by anchored patterns —
     # zero model calls, and therefore the only step that works on the FIRST turn,
@@ -1170,6 +1220,23 @@ async def _build_auto(
         if meta is not None:
             return meta
 
+    # «И всё?» after a section answer is a structural question, not a search
+    # query. Answering it from the catalogue avoids both literal retrieval of
+    # the phrase and another generic "nothing found" refusal.
+    if active_subject and rag_pipeline.is_completeness_followup(query):
+        inventory = await corpus_tree.section_inventory(active_subject, cv)
+        if inventory:
+            return RagContext(
+                intent="kb_question",
+                standalone_question=query,
+                context_subject=inventory.name,
+                answer_override=_section_completeness_answer(inventory),
+            )
+        completeness_query = (
+            "Какие продукты, сервисы и материалы входят в раздел "
+            f"{active_subject}?"
+        )
+
     # 0b. Hidden call 1: route the turn and rewrite it into a standalone query.
     # Отчёты обоих скрытых вызовов уезжают в запись хода одним словарём; он
     # общий для всех `RagContext` ниже, поэтому грейдер дописывает в него же.
@@ -1179,7 +1246,13 @@ async def _build_auto(
     hidden: dict[str, Any] = {"condense": condense_report, "grader": None}
     intent = condensed.intent
     alias_subject = rag_pipeline.transliterated_technical_subject(query)
-    if topic_opening_subject:
+    if completeness_query:
+        intent = "kb_question"
+        rq = completeness_query
+        scope = corpus_scope.DEFAULT_SCOPE
+        shape = "list"
+        context_subject = active_subject
+    elif topic_opening_subject:
         intent = rag_pipeline.TOPIC_OPENING_INTENT
         rq = topic_opening_subject
         scope = corpus_scope.DEFAULT_SCOPE
@@ -1206,9 +1279,6 @@ async def _build_auto(
         context_subject = (
             alias_subject or requested_description_subject or condensed.subject
         )
-    active_subject = rag_pipeline.canonicalize_technical_names(
-        (active_context or {}).get("subject")
-    ).strip()
     dependent_on_active = bool(
         active_subject and rag_pipeline.needs_history_resolution(query)
     )
@@ -1445,6 +1515,7 @@ async def _build_auto(
     strict_definition = definition_request and any(
         grade is not None for grade in grade_list
     )
+    definition_candidates = list(fragments)
     fragments, refused = rag_pipeline.select(
         fragments,
         grade_list,
@@ -1461,11 +1532,47 @@ async def _build_auto(
             answer_override=(
                 _NO_EXACT_EXAMPLE
                 if exact_example
-                else await _no_answer_for(answer_query, cv)
+                else await _no_answer_for(
+                    answer_query, cv, definition_candidates
+                )
             ),
             scope=scope,
             hidden_calls=hidden,
         )
+
+    # A section-index page can receive a high semantic grade because its title
+    # exactly equals X. It still does not answer «что такое X». When the
+    # catalogue confirms X is a section and selected fragments contain no
+    # explanatory prose, prefer an honest structural answer.
+    if definition_request:
+        subject = rag_pipeline.description_subject(answer_query)
+        inventory = (
+            await corpus_tree.section_inventory(subject, cv) if subject else None
+        )
+        has_explanation = any(
+            rag_pipeline.has_description_evidence(answer_query, fragment)
+            for fragment in fragments
+        )
+        if subject and not inventory and not has_explanation:
+            items = rag_pipeline.navigation_items(fragments)
+            if items:
+                inventory = corpus_tree.SectionInventory(
+                    name=subject,
+                    items=tuple(items),
+                    total_items=len(items),
+                    complete=False,
+                )
+        if inventory and not has_explanation:
+            return RagContext(
+                intent=intent,
+                standalone_question=rq,
+                context_subject=inventory.name,
+                candidates=candidates,
+                grades=grades_meta,
+                answer_override=_section_inventory_answer(inventory),
+                scope=scope,
+                hidden_calls=hidden,
+            )
 
     # Even a non-technical follow-up («есть ли примеры?») stays within the one
     # product restored by condense.  Relevance grading alone is not enough here:

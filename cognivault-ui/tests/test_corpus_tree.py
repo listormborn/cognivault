@@ -171,6 +171,7 @@ def test_find_section_returns_only_real_immediate_children():
         name="Fincert",
         items=("Fincert Enricher", "Сервис получения ФИДов"),
         total_items=2,
+        complete=True,
     )
 
 

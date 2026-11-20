@@ -1628,7 +1628,9 @@ def test_undefined_parent_is_presented_as_a_section_not_a_kb_product(monkeypatch
     mention.update(path="Продукты/Fincert.md", title="Fincert")
     _install_retrieval(monkeypatch, [mention])
     _install_complete_json(
-        monkeypatch, lambda prompt: {"grades": [{"id": 1, "score": 2}]}
+        # Even an over-confident grader must not turn a section index into a
+        # definition of Fincert.
+        monkeypatch, lambda prompt: {"grades": [{"id": 1, "score": 5}]}
     )
 
     async def inventory(subject, cv=None, *, limit=20):
@@ -1641,6 +1643,7 @@ def test_undefined_parent_is_presented_as_a_section_not_a_kb_product(monkeypatch
                 "Сервис получения ФИДов",
             ),
             total_items=3,
+            complete=True,
         )
 
     monkeypatch.setattr(rag.corpus_tree, "section_inventory", inventory)
@@ -1656,6 +1659,146 @@ def test_undefined_parent_is_presented_as_a_section_not_a_kb_product(monkeypatch
     assert "- Сервис получения ФИДов" in answer
     assert "Fincert — продукт в базе знаний" not in answer
     assert ctx.sources == []
+
+
+def test_section_index_falls_back_to_its_links_when_catalogue_is_unavailable(
+    monkeypatch,
+):
+    index_page = _frag(
+        1,
+        text=(
+            "# Fincert\n"
+            "- [Fincert Enricher](./Fincert-enricher)\n"
+            "- [Сервис ответов на запросы](./responses)\n"
+            "- [Сервис получения ФИДов](./fids)"
+        ),
+    )
+    index_page.update(path="Продукты/Fincert.md", title="Fincert")
+    _install_retrieval(monkeypatch, [index_page])
+    _install_complete_json(
+        monkeypatch, lambda prompt: {"grades": [{"id": 1, "score": 5}]}
+    )
+
+    async def no_inventory(subject, cv=None, *, limit=20):
+        return None
+
+    monkeypatch.setattr(rag.corpus_tree, "section_inventory", no_inventory)
+
+    ctx = _build("Что такое Fincert?")
+
+    answer = ctx.answer_override or ""
+    assert "раздел или страница «Fincert»" in answer
+    assert "- Fincert Enricher" in answer
+    assert "- Сервис ответов на запросы" in answer
+    assert "- Сервис получения ФИДов" in answer
+    assert "может быть неполным" in answer
+    assert ctx.sources == []
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "И всё?",
+        "Больше ничего?",
+        "Только это?",
+        "Это вся информация?",
+        "А ещё?",
+        "Есть ещё документы?",
+    ],
+)
+def test_completeness_followup_is_recognized(question):
+    assert rag_pipeline.is_completeness_followup(question) is True
+    assert rag_pipeline.needs_history_resolution(question) is True
+
+
+def test_completeness_followup_for_a_section_uses_catalogue_without_search(
+    monkeypatch,
+):
+    seen = _install_retrieval(monkeypatch, [_frag(1)])
+
+    async def inventory(subject, cv=None, *, limit=20):
+        assert subject == "Fincert"
+        return rag.corpus_tree.SectionInventory(
+            name="Fincert",
+            items=("Fincert Enricher", "Сервис получения ФИДов"),
+            total_items=2,
+            complete=True,
+        )
+
+    monkeypatch.setattr(rag.corpus_tree, "section_inventory", inventory)
+
+    ctx = _build(
+        "И всё?",
+        messages=[
+            {"role": "user", "content": "Что такое Fincert?"},
+            {"role": "assistant", "content": "В базе есть раздел Fincert."},
+        ],
+        active_context={"subject": "Fincert"},
+    )
+
+    assert seen == []
+    assert ctx.context_subject == "Fincert"
+    assert ctx.answer_override is not None
+    assert "это все дочерние страницы" in ctx.answer_override
+    assert "- Fincert Enricher" in ctx.answer_override
+    assert "Других дочерних страниц" in ctx.answer_override
+
+
+def test_completeness_followup_without_catalogue_searches_the_active_section(
+    monkeypatch,
+):
+    hit = _frag(1, text="Fincert Enricher; Сервис получения ФИДов")
+    hit.update(path="Продукты/Fincert.md", title="Fincert")
+    seen = _install_retrieval(monkeypatch, [hit])
+    _install_complete_json(
+        monkeypatch,
+        lambda prompt: (
+            {
+                "intent": "kb_question",
+                "standalone_question": "Что ещё есть в Fincert?",
+                "uses_history": True,
+                "context_subject": "Fincert",
+            }
+            if _is_condense(prompt)
+            else {"grades": [{"id": 1, "score": 5}]}
+        ),
+    )
+
+    async def no_inventory(subject, cv=None, *, limit=20):
+        return None
+
+    monkeypatch.setattr(rag.corpus_tree, "section_inventory", no_inventory)
+
+    ctx = _build(
+        "И всё?",
+        messages=[
+            {"role": "user", "content": "Что такое Fincert?"},
+            {"role": "assistant", "content": "В базе есть раздел Fincert."},
+        ],
+        active_context={"subject": "Fincert"},
+    )
+
+    expected = "Какие продукты, сервисы и материалы входят в раздел Fincert?"
+    assert seen[0][0] == expected
+    assert ctx.standalone_question == expected
+    assert ctx.context_subject == "Fincert"
+    assert ctx.answer_override is None
+    assert ctx.sources
+
+
+def test_definition_evidence_distinguishes_workflow_from_navigation():
+    question = "Что такое Fincert?"
+    navigation = {
+        "title": "Fincert",
+        "text": "# Fincert\n- [Fincert Enricher](enricher)\n- [Сервис ФИДов](fids)",
+    }
+    explanation = {
+        "title": "Fincert",
+        "text": "Fincert обрабатывает входящие сообщения и формирует ответы.",
+    }
+
+    assert rag_pipeline.has_description_evidence(question, navigation) is False
+    assert rag_pipeline.has_description_evidence(question, explanation) is True
 
 
 def test_prompts_do_not_infer_entity_type_from_knowledge_base_location():

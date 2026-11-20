@@ -200,6 +200,7 @@ class SectionInventory:
     name: str
     items: tuple[str, ...]
     total_items: int
+    complete: bool
 
 
 def _segments(path: str) -> list[str]:
@@ -622,6 +623,7 @@ def find_section(
         name=node.name,
         items=tuple(names[:limit]),
         total_items=len(names),
+        complete=prepared[2] <= prepared[3],
     )
 
 

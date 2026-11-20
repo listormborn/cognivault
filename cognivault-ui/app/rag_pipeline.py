@@ -975,6 +975,18 @@ _EXPANSION_FOLLOWUP = re.compile(
     r"[?!.]*$",
     re.IGNORECASE,
 )
+_COMPLETENESS_FOLLOWUP = re.compile(
+    r"^(?:а\s+|и\s+)?(?:"
+    r"(?:это\s+)?(?:все|всё)(?:\s+(?:документы|материалы|страницы|информация))?|"
+    r"только\s+это|больше\s+ничего|"
+    r"больше\s+(?:нет|ничего\s+нет)|"
+    r"это\s+вся\s+информация|"
+    r"(?:есть\s+)?(?:еще|ещё)(?:\s+что-нибудь)?|"
+    r"(?:есть|будут)\s+(?:ли\s+)?(?:еще|ещё)\s+"
+    r"(?:документы|материалы|страницы|детали|информация))"
+    r"[?!.]*$",
+    re.IGNORECASE,
+)
 
 # Dialogue-control turns do not contain a normal search query of their own.
 # They either transform the preceding answer or select/verify/correct the
@@ -1058,6 +1070,12 @@ def is_answer_rewrite_request(question: str) -> bool:
     return bool(text and _ANSWER_REWRITE_REQUEST.fullmatch(text))
 
 
+def is_completeness_followup(question: str) -> bool:
+    """Whether the user asks if the preceding topic/list is exhaustive."""
+    text = " ".join(str(question or "").strip().split())
+    return bool(text and _COMPLETENESS_FOLLOWUP.fullmatch(text))
+
+
 def _is_dialogue_control_followup(question: str) -> bool:
     """Whether a turn needs a preceding offer, question, or answer."""
     text = " ".join(str(question or "").strip().split())
@@ -1065,6 +1083,7 @@ def _is_dialogue_control_followup(question: str) -> bool:
         text
         and (
             _ANSWER_REWRITE_REQUEST.fullmatch(text)
+            or _COMPLETENESS_FOLLOWUP.fullmatch(text)
             or _DIALOGUE_SELECTION.fullmatch(text)
             or _VERIFICATION_FOLLOWUP.fullmatch(text)
             or _TOPIC_CORRECTION_FOLLOWUP.fullmatch(text)
@@ -1119,6 +1138,8 @@ def _needs_history_resolution(question: str) -> bool:
     if not text:
         return False
     if _EXPANSION_FOLLOWUP.fullmatch(text):
+        return True
+    if _COMPLETENESS_FOLLOWUP.fullmatch(text):
         return True
     if (
         _DIALOGUE_SELECTION.fullmatch(text)
@@ -1232,6 +1253,100 @@ def description_subject(question: str) -> str | None:
 def requests_tool_description(question: str) -> bool:
     """Whether the user explicitly asks what a named object/tool is."""
     return _description_match(question) is not None
+
+
+_DESCRIPTION_EXPLANATORY_ACTION = re.compile(
+    r"\b(?:предназнач\w*|позволя\w*|обеспеч\w*|обрабатыва\w*|"
+    r"сопоставля\w*|формиру\w*|выполня\w*|реализу\w*|использу\w*|"
+    r"реша\w*|отвеча\w*\s+за|служи\w*|работа\w*\s+как|"
+    r"явля\w*|представля\w*\s+собой)\b",
+    re.IGNORECASE,
+)
+_MARKDOWN_LINK = re.compile(r"\[[^\]]+\]\([^)]+\)")
+_MARKDOWN_LINK_PARTS = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+_NAVIGATION_BULLET = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)(.+?)\s*$")
+
+
+def has_description_evidence(question: str, fragment: dict[str, Any]) -> bool:
+    """Whether a fragment explains X rather than merely listing its name.
+
+    This is a deterministic backstop after the semantic grader. It is used only
+    when X is also a real catalogue section, where an index page can otherwise
+    win by exact-title similarity and be mistaken for a product definition.
+    """
+    subject = description_subject(question)
+    if not subject:
+        return False
+    text = str(fragment.get("section_text") or fragment.get("text") or "")
+    if not text.strip():
+        return False
+    # Navigation-heavy lines are evidence of composition, not meaning. Keep
+    # prose outside them; a real explanatory paragraph remains intact.
+    prose_lines = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(("#", "- [", "* [", "+ [")):
+            continue
+        without_links = _MARKDOWN_LINK.sub("", line).strip(" -–—*•|\t")
+        if without_links:
+            prose_lines.append(without_links)
+    prose = " ".join(prose_lines)
+    if len(prose) < 35:
+        return False
+    if _DESCRIPTION_EXPLANATORY_ACTION.search(prose):
+        return True
+    # Conventional explicit definition without one of the verbs above.
+    escaped = re.escape(subject)
+    return bool(
+        re.search(
+            rf"(?<![\w]){escaped}(?![\w])\s*(?:—|\s-\s)\s*"
+            rf"\S+(?:\s+\S+){{2,}}",
+            prose,
+            re.IGNORECASE,
+        )
+    )
+
+
+def navigation_items(
+    fragments: list[dict[str, Any]], *, limit: int = 20
+) -> list[str]:
+    """Extract child labels from a section/index page without interpreting them."""
+    if limit <= 0:
+        return []
+    items: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str) -> None:
+        label = " ".join(value.strip(" \t-*•—–:;,.!?«»\"'`").split())
+        key = label.casefold()
+        if (
+            not label
+            or len(label) > 120
+            or len(label.split()) > 12
+            or key in seen
+            or key in {"назад", "далее", "подробнее", "содержание", "оглавление"}
+        ):
+            return
+        seen.add(key)
+        items.append(label)
+
+    for fragment in fragments:
+        text = str(fragment.get("section_text") or fragment.get("text") or "")
+        for label, _url in _MARKDOWN_LINK_PARTS.findall(text):
+            add(label)
+            if len(items) >= limit:
+                return items
+        for line in text.splitlines():
+            match = _NAVIGATION_BULLET.match(line)
+            if not match or _MARKDOWN_LINK_PARTS.search(line):
+                continue
+            candidate = match.group(1)
+            # A catalogue item is a short label, not a prose bullet.
+            if not re.search(r"[.!?](?:\s|$)", candidate):
+                add(candidate)
+                if len(items) >= limit:
+                    return items
+    return items
 
 
 def needs_history_resolution(question: str) -> bool:
