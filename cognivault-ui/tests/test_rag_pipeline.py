@@ -2021,7 +2021,10 @@ def test_fincert_monitoring_question_keeps_product_boundary(
 ):
     fincert = _frag(
         1,
-        text="Для Fincert описан бизнес-мониторинг обработки запросов.",
+        text=(
+            "Для Fincert описан бизнес-мониторинг обработки запросов.\n\n"
+            "Мониторинг моделей в АРМ DS показывает метрики качества."
+        ),
     )
     fincert.update(
         path="Продукты/Fincert/Инструкция для бизнес-мониторинга Fincert.md",
@@ -2048,6 +2051,23 @@ def test_fincert_monitoring_question_keeps_product_boundary(
     assert [source["path"] for source in ctx.sources] == [fincert["path"]]
     assert "бизнес-мониторинг" in prompts[-1]
     assert "Мониторинг моделей в АРМ DS" not in prompts[-1]
+    assert ctx.sources[0]["depth"] == "chunk"
+
+
+def test_conflicting_feature_paragraph_is_pruned_from_an_accepted_source():
+    cleaned = rag_pipeline.prune_conflicting_feature_evidence(
+        "Есть ли мониторинг в Fincert?",
+        "Fincert",
+        {
+            "text": (
+                "Для Fincert описан бизнес-мониторинг запросов. "
+                "Мониторинг моделей в АРМ DS показывает метрики качества."
+            )
+        },
+    )
+
+    assert "бизнес-мониторинг" in cleaned["text"]
+    assert "АРМ DS" not in cleaned["text"]
 
 
 @pytest.mark.parametrize(

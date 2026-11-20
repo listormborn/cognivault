@@ -1819,7 +1819,8 @@ def _feature_container_terms(question: str, subject: str) -> list[str]:
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
-            return _context_tokens(match.group("feature"))
+            feature_text = re.sub(r"[-_.]+", " ", match.group("feature"))
+            return _context_tokens(feature_text)
     return []
 
 
@@ -1877,6 +1878,44 @@ def source_supports_feature_in_container(
         if has_target and has_feature:
             return True
     return False
+
+
+def prune_conflicting_feature_evidence(
+    question: str,
+    subject: str,
+    source: dict[str, Any],
+) -> dict[str, Any]:
+    """Remove local units that attribute the requested feature to another product."""
+    feature = _feature_container_terms(question, subject)
+    if not feature:
+        return dict(source)
+    cleaned = dict(source)
+    for key in ("text", "section_text"):
+        body = str(cleaned.get(key) or "")
+        if not body:
+            continue
+        units = re.split(r"(?:\n\s*\n+|(?<=[.!?])\s+(?=[A-ZА-ЯЁ]))", body)
+        kept: list[str] = []
+        for unit in units:
+            relation_text = re.sub(
+                r"[-_.]+", " ", canonicalize_technical_names(unit)
+            )
+            available = _context_tokens(relation_text)
+            has_feature = all(
+                any(_same_context_token(term, token) for token in available)
+                for term in feature
+            )
+            named_products = explicit_technical_subjects(unit)
+            has_other_product = any(
+                not context_subjects_overlap(subject, named)
+                for named in named_products
+            )
+            if has_feature and has_other_product:
+                continue
+            if unit.strip():
+                kept.append(unit.strip())
+        cleaned[key] = "\n\n".join(kept)
+    return cleaned
 
 
 def _context_subject(value: Any) -> str | None:

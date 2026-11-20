@@ -460,7 +460,7 @@ def test_block_precedes_sources_and_reminder_keeps_the_tail(monkeypatch):
     assert content.index("Источники:") < content.index("Напоминание:")
     assert content.index("Напоминание:") < content.index("Вопрос:")
     # Модель видит, сколько фрагментов ей дали из скольких документов.
-    assert "Всего документов в базе: 127." in content
+    assert "Всего документов в базе: 96." in content
     assert f"— {len(ctx.sources)} " in content
 
 
@@ -541,7 +541,7 @@ def test_block_reaches_the_model_and_survives_trimming(monkeypatch, tmp_path):
     assert resp.status_code == 200
     last = captured[0][-1]["content"]
     assert last.startswith("Состав базы знаний")
-    assert last.index("Всего документов в базе: 127.") < last.index("Источники:")
+    assert last.index("Всего документов в базе: 96.") < last.index("Источники:")
     assert last.endswith(f"Вопрос: {question}")
 
 

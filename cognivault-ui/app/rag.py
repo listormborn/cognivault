@@ -1611,6 +1611,13 @@ async def _build_auto(
             section_max_chars,
             max_expanded_files,
         )
+    if feature_container:
+        # A file/section that contains one valid Fincert paragraph may also
+        # contain a distant ARM DS monitoring paragraph.  For a scoped
+        # existence question, expanding that whole file reintroduces evidence
+        # the product boundary deliberately rejected.  Keep only retrieved,
+        # locally checked chunks for this answer shape.
+        max_expanded_files = 0
     if intent in _NO_RAG_INTENTS:
         # Chit-chat / "say that again": no retrieval, the model answers from the
         # untouched history — but NOT without rules. A misrouted knowledge-base
@@ -1722,6 +1729,17 @@ async def _build_auto(
                 scope=scope,
                 hidden_calls=hidden,
             )
+    if feature_container:
+        # Validate the relationship against the original local paragraph first,
+        # then remove conflicting sentences before grading/rendering.  Pruning
+        # first could split a valid two-sentence paragraph («мониторинг…» then
+        # «бизнес-показатели…») and erase the evidence used by the relation test.
+        fragments = [
+            rag_pipeline.prune_conflicting_feature_evidence(
+                query, feature_container, fragment
+            )
+            for fragment in fragments
+        ]
 
     candidates = [
         {

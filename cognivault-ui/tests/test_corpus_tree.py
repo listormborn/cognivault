@@ -346,8 +346,11 @@ def test_totals_come_from_the_catalogue_and_paging_is_admitted():
     payload = _payload(total=127)
     block = corpus_tree.render(payload, n_sources=5)
 
-    assert "Всего документов в базе: 127." in block
-    assert "показаны 21 документ" in block
+    # Серверный total включает три архивные строки, уже видимые на этой
+    # странице. Активная база поэтому содержит не более 124 документов; из них
+    # в полученной странице перечислены 18 активных.
+    assert "Всего документов в базе: 124." in block
+    assert "показаны 18 документов" in block
     assert "— 5 фрагментов" in block
 
 

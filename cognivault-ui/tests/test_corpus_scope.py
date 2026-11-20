@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -305,7 +306,11 @@ def test_the_two_noun_lists_do_not_overlap():
     ]
     assert len(verb_anchored) == 1
     for noun in assistant_nouns:
-        assert f"{noun}|" not in verb_anchored[0] and f"|{noun}" not in verb_anchored[0]
+        assert not re.search(
+            rf"(?<![а-яё]){re.escape(noun)}(?![а-яё])",
+            verb_anchored[0],
+            re.IGNORECASE,
+        )
     for noun in corpus_nouns:
         assert noun in verb_anchored[0]
 
@@ -867,7 +872,7 @@ def test_meta_question_is_answered_from_the_section_tree(monkeypatch):
     # Ответ строится из настоящего дерева, а не из выдуманного текста.
     content = ctx.user_message["content"]
     assert "Структура базы знаний" in content
-    assert "Всего документов в базе: 28." in content
+    assert "Всего документов в базе: 24." in content
     assert "- Продукты — 21" in content and "Fincert: 12" in content
     assert content.endswith("Вопрос: О чём эта база?")
     # Системный турн — свой: `NO_RAG_SYSTEM_PROMPT` запрещает утверждать то,

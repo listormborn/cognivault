@@ -510,7 +510,21 @@ def _prepare(
     roots, prefix = build(documents)
     if not roots:
         return None
-    total = len(documents)
+    raw_documents = catalog.documents_of(data)
+    raw_total = data.get("total")
+    archived_on_page = max(0, len(raw_documents) - len(documents))
+    # `documents` may be only the first catalogue page.  Preserve the
+    # authoritative backend total instead of reporting the page length, while
+    # subtracting archived rows we can actually see.  Unknown archived rows on
+    # later pages cannot be inferred, so this deliberately under-corrects
+    # rather than inventing a number.
+    total = (
+        max(len(documents), raw_total - archived_on_page)
+        if isinstance(raw_total, int)
+        and not isinstance(raw_total, bool)
+        and raw_total >= 0
+        else len(documents)
+    )
     annotated = any(d.get("summary") for d in documents)
     return roots, prefix, total, len(documents), annotated
 

@@ -125,19 +125,18 @@ def test_exception_inside_the_harness_does_not_kill_the_process(tmp_path, monkey
 
 def test_second_run_is_refused_while_the_first_is_alive(tmp_path, monkeypatch):
     """Два прогона дрались бы за лимит GigaChat и за один файл отчёта."""
-    started = asyncio.Event()
-    release = asyncio.Event()
-
-    class Slow:
-        @staticmethod
-        async def main_async(argv):
-            started.set()
-            await release.wait()
-            return 0
-
-    monkeypatch.setattr(eval_runner, "_load_harness", lambda: Slow)
-
     async def go():
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class Slow:
+            @staticmethod
+            async def main_async(argv):
+                started.set()
+                await release.wait()
+                return 0
+
+        monkeypatch.setattr(eval_runner, "_load_harness", lambda: Slow)
         eval_runner.RUNNER.start(label="first", argv=[], out_dir=tmp_path / "rep")
         await started.wait()
         assert eval_runner.RUNNER.busy()
@@ -152,23 +151,22 @@ def test_second_run_is_refused_while_the_first_is_alive(tmp_path, monkeypatch):
 
 def test_running_job_can_be_cancelled_and_resources_are_released(tmp_path, monkeypatch):
     """Остановка — отдельный штатный исход, а не красная ошибка прогона."""
-    started = asyncio.Event()
-    closed = asyncio.Event()
-
-    class Slow:
-        LOG_SINK = None
-
-        @staticmethod
-        async def main_async(argv):
-            started.set()
-            try:
-                await asyncio.Event().wait()
-            finally:
-                closed.set()
-
-    monkeypatch.setattr(eval_runner, "_load_harness", lambda: Slow)
-
     async def go():
+        started = asyncio.Event()
+        closed = asyncio.Event()
+
+        class Slow:
+            LOG_SINK = None
+
+            @staticmethod
+            async def main_async(argv):
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    closed.set()
+
+        monkeypatch.setattr(eval_runner, "_load_harness", lambda: Slow)
         job = eval_runner.RUNNER.start(label="first", argv=[], out_dir=tmp_path / "rep")
         await started.wait()
         stopped = await eval_runner.RUNNER.stop()
